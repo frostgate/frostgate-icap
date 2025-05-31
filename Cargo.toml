@@ -1,0 +1,33 @@
+[package]
+name = "frostgate-icap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
+bincode.workspace = true
+sha2 = "0.10.9"
+tokio.workspace = true
+num_cpus = "1.16.0"
+frostgate-sdk = { path = "../frostgate-sdk" }
+frostgate-prover = { path = "../frostgate-prover" }
+frostgate-verifier = { path = "../frostgate-verifier" }
+frostgate-zkip = { path = "../frostgate-zkip" }
+ethers.workspace = true
+solana-client = { workspace = true }
+base64 = { workspace = true }
+log = "0.4.27"
+solana-sdk = "2.2.2"
+solana-transaction-status = "2.2.7"
+reqwest = "0.11"
+subxt = "0.42.1"
+tracing = "0.1.41"
+
+[features]
+examples = []

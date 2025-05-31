@@ -23,6 +23,7 @@ use subxt::{
     blocks::BlocksClient,
     utils::{H256, AccountId32},
 };
+use subxt::*;
 use uuid::Uuid;
 use std::{
     collections::HashMap,
@@ -370,7 +371,7 @@ impl PolkadotAdapter {
                 // Perform health check
                 let health_result = timeout(
                     DEFAULT_RPC_TIMEOUT,
-                    client.rpc().header(None)
+                    client.blocks().at_latest().await?.header()
                 ).await;
                 
                 let mut metrics = health_metrics.lock().await;
@@ -622,7 +623,7 @@ impl ChainAdapter for PolkadotAdapter {
         debug!("Fetching latest block number");
         
         let header = self.execute_rpc_call(|| async {
-            self.client.rpc().header(None).await
+            self.client.blocks().at(block_hash).header().await
         }).await?;
         
         let block_number = header
@@ -934,7 +935,7 @@ impl ChainAdapter for PolkadotAdapter {
                     }
                 }
                 TxTrackingStatus::Finalized => MessageStatus::Confirmed,
-                TxTrackingStatus::Failed => MessageStatus::Failed,
+                TxTrackingStatus::Failed => MessageStatus::Failed("message failed".to_string()),
                 TxTrackingStatus::Unknown => MessageStatus::Pending,
             };
             

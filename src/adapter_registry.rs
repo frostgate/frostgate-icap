@@ -6,10 +6,12 @@
 use crate::chainadapter::{
     AdapterError, ChainAdapter,
 };
+use ethers::core::k256::elliptic_curve::Error;
 use frostgate_sdk::frostmessage::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::fmt;
+use subxt::config::substrate::H256;
 
 /// Errors that can occur when working with the adapter registry
 #[derive(Debug, Clone, PartialEq)]
@@ -40,7 +42,7 @@ impl std::error::Error for AdapterRegistryError {}
 
 /// Thread-safe registry for managing chain adapters
 pub struct AdapterRegistry {
-    adapters: RwLock<HashMap<ChainId, Arc<dyn ChainAdapter>>>,
+    adapters: RwLock<HashMap<ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>>,
 }
 
 impl AdapterRegistry {
@@ -57,7 +59,7 @@ impl AdapterRegistry {
     pub fn register_adapter(
         &self,
         chain_id: ChainId,
-        adapter: Arc<dyn ChainAdapter>,
+        adapter: Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>,
     ) -> Result<(), AdapterRegistryError> {
         let mut adapters = self.adapters.write()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
@@ -76,8 +78,8 @@ impl AdapterRegistry {
     pub fn register_or_update_adapter(
         &self,
         chain_id: ChainId,
-        adapter: Arc<dyn ChainAdapter>,
-    ) -> Result<Option<Arc<dyn ChainAdapter>>, AdapterRegistryError> {
+        adapter: Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>,
+    ) -> Result<Option<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>, AdapterRegistryError> {
         let mut adapters = self.adapters.write()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
 
@@ -85,13 +87,13 @@ impl AdapterRegistry {
     }
 
     /// Retrieves an adapter for the specified chain ID
-    pub fn get_adapter(&self, chain_id: &ChainId) -> Result<Arc<dyn ChainAdapter>, AdapterRegistryError> {
+    pub fn get_adapter(&self, chain_id: &ChainId) -> Result<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>, AdapterRegistryError> {
         let adapters = self.adapters.read()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
 
         adapters.get(chain_id)
             .cloned()
-            .ok_or_else(|| AdapterRegistryError::AdapterNotFound(*chain_id))
+            .ok_or_else(|| AdapterRegistryError::AdapterNotFound(*chain_id)) // Implement copy here too
     }
 
     /// Checks if an adapter exists for the specified chain ID
@@ -105,7 +107,7 @@ impl AdapterRegistry {
     /// Removes an adapter for the specified chain ID
     /// 
     /// Returns the removed adapter if it existed
-    pub fn remove_adapter(&self, chain_id: &ChainId) -> Result<Option<Arc<dyn ChainAdapter>>, AdapterRegistryError> {
+    pub fn remove_adapter(&self, chain_id: &ChainId) -> Result<Option<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>, AdapterRegistryError> {
         let mut adapters = self.adapters.write()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
 
@@ -117,6 +119,7 @@ impl AdapterRegistry {
         let adapters = self.adapters.read()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
 
+        // Implement copy here, this should solve the problem here
         Ok(adapters.keys().copied().collect())
     }
 
@@ -142,7 +145,7 @@ impl AdapterRegistry {
     /// This is useful for operations that need to work with multiple adapters atomically
     pub fn with_adapters<F, R>(&self, f: F) -> Result<R, AdapterRegistryError>
     where
-        F: FnOnce(&HashMap<ChainId, Arc<dyn ChainAdapter>>) -> R,
+        F: FnOnce(&HashMap<ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>) -> R,
     {
         let adapters = self.adapters.read()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
@@ -153,7 +156,7 @@ impl AdapterRegistry {
     /// Bulk register multiple adapters
     /// 
     /// If any registration fails, all previous registrations in this batch are rolled back
-    pub fn bulk_register(&self, adapters: Vec<(ChainId, Arc<dyn ChainAdapter>)>) -> Result<(), AdapterRegistryError> {
+    pub fn bulk_register(&self, adapters: Vec<(ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>)>) -> Result<(), AdapterRegistryError> {
         let mut registry = self.adapters.write()
             .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
 
@@ -210,15 +213,54 @@ impl fmt::Debug for AdapterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
 
     // Mock adapter for testing
     struct MockAdapter {
         chain_id: ChainId,
     }
 
+    #[async_trait]
     impl ChainAdapter for MockAdapter {
-        // Implement required methods based on your ChainAdapter trait
-        // This is just a placeholder - you'll need to implement actual methods
+        type BlockId = u32;
+        type TxId = H256;
+        type Error = AdapterError;
+
+        async fn latest_block(&self) -> Result<Self::BlockId, Self::Error> {
+            Ok(0)
+        }
+
+        async fn get_transaction(&self, _tx: &Self::TxId) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn wait_for_finality(&self, _block: &Self::BlockId) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn submit_message(&self, _msg: &FrostMessage) -> Result<Self::TxId, Self::Error> {
+            Ok(H256::zero())
+        }
+
+        async fn listen_for_events(&self) -> Result<Vec<MessageEvent>, Self::Error> {
+            Ok(vec![])
+        }
+
+        async fn estimate_fee(&self, _msg: &FrostMessage) -> Result<u128, Self::Error> {
+            Ok(0)
+        }
+
+        async fn health_check(&self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn message_status(&self, _id: &uuid::Uuid) -> Result<MessageStatus, Self::Error> {
+            Ok(MessageStatus::Pending)
+        }
+
+        async fn verify_on_chain(&self, _msg: &FrostMessage) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]

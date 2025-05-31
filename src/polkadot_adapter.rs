@@ -17,12 +17,15 @@ use frostgate_sdk::frostmessage::{
 use async_trait::async_trait;
 use subxt::{
     OnlineClient, PolkadotConfig as SubxtPolkadotConfig, 
-    tx::{PairSigner, TxStatus, TxProgress}, 
+    tx::{TxStatus, TxProgress}, 
     error::Error as SubxtError,
     events::EventsClient,
     blocks::BlocksClient,
     utils::{H256, AccountId32},
 };
+use subxt_signer::sr25519::Keypair;
+use sp_keyring::ed25519::ed25519::Pair;
+use subxt_signer::PairSigner;
 use subxt::*;
 use uuid::Uuid;
 use std::{

@@ -6,6 +6,9 @@
 #![allow(unused_mut)]
 #![allow(dead_code)]
 
+
+use crate::types::{HealthMetrics, ConnectionStatus};
+use crate::utils::retry_async;
 use crate::chainadapter::{
     ChainAdapter, AdapterError,
 };
@@ -20,7 +23,7 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use std::{
     collections::HashMap,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex};
@@ -81,21 +84,6 @@ struct CachedTransaction {
     pub message_id: Uuid,
     /// Current retry count
     pub retry_count: u32,
-}
-
-/// Connection health metrics
-#[derive(Debug, Default, Clone)]
-struct HealthMetrics {
-    /// Last successful RPC call timestamp
-    pub last_successful_call: Option<Instant>,
-    /// Number of consecutive failures
-    pub consecutive_failures: u32,
-    /// Total number of RPC calls
-    pub total_calls: u64,
-    /// Total number of failed calls
-    pub failed_calls: u64,
-    /// Average response time for successful calls
-    pub avg_response_time: Duration,
 }
 
 /// Frostgate's Ethereum adapter
@@ -329,8 +317,13 @@ impl EthereumAdapter {
     async fn update_success_metrics(&self, response_time: Duration) {
         let mut metrics = self.health_metrics.lock().await;
         metrics.last_successful_call = Some(Instant::now());
+        metrics.last_successful_timestamp = Some(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64);
         metrics.consecutive_failures = 0;
         metrics.total_calls += 1;
+        metrics.connection_status = ConnectionStatus::Healthy;
         
         // Update average response time (simple moving average)
         let total_successful = metrics.total_calls - metrics.failed_calls;
@@ -349,6 +342,11 @@ impl EthereumAdapter {
         metrics.consecutive_failures += 1;
         metrics.total_calls += 1;
         metrics.failed_calls += 1;
+        metrics.connection_status = if metrics.consecutive_failures > 5 {
+            ConnectionStatus::Unhealthy
+        } else {
+            ConnectionStatus::Degraded
+        };
     }
     
     /// Performs a comprehensive health check

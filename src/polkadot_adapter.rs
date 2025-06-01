@@ -6,6 +6,8 @@
 #![allow(unused_mut)]
 #![allow(dead_code)]
 
+use crate::types::{HealthMetrics, ConnectionStatus};
+use crate::utils::retry_async;
 use crate::chainadapter::{
     ChainAdapter, AdapterError,
 };
@@ -23,17 +25,17 @@ use subxt::{
     blocks::BlocksClient,
     utils::{H256, AccountId32},
 };
-use subxt_signer::sr25519::Keypair;
-use sp_keyring::ed25519::ed25519::Pair;
-use subxt_signer::PairSigner;
-use subxt::*;
+use sp_core::{sr25519::Pair, Pair as PairT};
+use subxt_signer::sr25519::Keypair as SubxtKeypair;
+use subxt_signer::SecretUri;
 use uuid::Uuid;
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     fmt,
 };
+use std::str::FromStr;
 use tokio::sync::{RwLock, Mutex, Semaphore};
 use tokio::time::{sleep, timeout, interval, MissedTickBehavior};
 use tracing::{info, warn, error, debug, instrument, span, Level};
@@ -132,50 +134,6 @@ pub struct ChainSpecificConfig {
     pub custom_rpc_methods: Option<HashMap<String, String>>,
 }
 
-/// Comprehensive health metrics for monitoring adapter performance
-///
-/// These metrics provide visibility into the adapter's operational status
-/// and can be used for alerting and performance optimization.
-#[derive(Debug, Clone)]
-struct HealthMetrics {
-    /// Timestamp of the last successful RPC call
-    pub last_successful_call: Option<Instant>,
-    
-    /// Number of consecutive failed operations
-    pub consecutive_failures: u32,
-    
-    /// Total number of RPC calls made
-    pub total_calls: u64,
-    
-    /// Total number of failed RPC calls
-    pub failed_calls: u64,
-    
-    /// Average response time for successful calls
-    pub avg_response_time: Duration,
-    
-    /// Current connection status
-    pub connection_status: ConnectionStatus,
-    
-    /// Latest block number seen
-    pub latest_block_seen: Option<u32>,
-    
-    /// Timestamp when metrics were last updated
-    pub last_updated: Instant,
-}
-
-/// Connection status enumeration
-#[derive(Debug, Clone, PartialEq)]
-enum ConnectionStatus {
-    /// Connection is healthy and operational
-    Healthy,
-    /// Connection is degraded but functional
-    Degraded,
-    /// Connection is unhealthy or failed
-    Unhealthy,
-    /// Connection status is unknown (initial state)
-    Unknown,
-}
-
 /// Transaction tracking information
 ///
 /// Maintains state and metadata for submitted transactions
@@ -221,7 +179,7 @@ enum TxTrackingStatus {
 /// Polkadot/Substrate chain adapter
 pub struct PolkadotAdapter {
     /// Subxt client for blockchain interaction
-    client: Arc<OnlineClient<SubxtPolkadotConfig>>,
+    client: OnlineClient<SubxtPolkadotConfig>,
     
     /// Adapter configuration
     config: PolkadotConfig,
@@ -242,7 +200,7 @@ pub struct PolkadotAdapter {
     _health_monitor_handle: tokio::task::JoinHandle<()>,
     
     /// Transaction signer for submitting extrinsics
-    signer: Arc<PairSigner<SubxtPolkadotConfig, subxt::utils::MultiSignature>>,
+    signer: Arc<SubxtKeypair>,
 }
 
 impl fmt::Debug for PolkadotAdapter {
@@ -271,16 +229,7 @@ impl PolkadotAdapter {
         let signer = Self::create_signer(&config)?;
         
         // Initialize health metrics
-        let health_metrics = Arc::new(Mutex::new(HealthMetrics {
-            last_successful_call: None,
-            consecutive_failures: 0,
-            total_calls: 0,
-            failed_calls: 0,
-            avg_response_time: Duration::ZERO,
-            connection_status: ConnectionStatus::Unknown,
-            latest_block_seen: None,
-            last_updated: Instant::now(),
-        }));
+        let health_metrics = Arc::new(Mutex::new(HealthMetrics::default()));
         
         // Create semaphore for concurrent request limiting
         let max_concurrent = config.max_concurrent_requests
@@ -290,7 +239,7 @@ impl PolkadotAdapter {
         // Start background health monitoring if configured
         let health_monitor_handle = if config.health_check_interval.is_some() {
             Self::start_health_monitor(
-                Arc::clone(&client),
+                client.clone(),
                 Arc::clone(&health_metrics),
                 config.health_check_interval.unwrap(),
             )
@@ -300,7 +249,7 @@ impl PolkadotAdapter {
         };
         
         let adapter = Self {
-            client: Arc::new(client),
+            client,
             config,
             message_tx_mapping: Arc::new(RwLock::new(HashMap::new())),
             health_metrics,
@@ -346,11 +295,12 @@ impl PolkadotAdapter {
     /// Creates and configures the transaction signer
     ///
     /// Initializes the cryptographic signer for submitting transactions to the chain.
-    fn create_signer(config: &PolkadotConfig) -> Result<PairSigner<SubxtPolkadotConfig, subxt::utils::MultiSignature>, AdapterError> {
-        let pair = subxt::utils::sr25519::Pair::from_string(&config.signer_seed, None)
+    fn create_signer(config: &PolkadotConfig) -> Result<SubxtKeypair, AdapterError> {
+        let secret_uri = SecretUri::from_str(&config.signer_seed)
             .map_err(|e| AdapterError::Other(format!("Invalid signer seed: {}", e)))?;
             
-        Ok(PairSigner::new(pair))
+        SubxtKeypair::from_uri(&secret_uri)
+            .map_err(|e| AdapterError::Other(format!("Failed to create keypair: {}", e)))
     }
     
     /// Starts the background health monitoring task
@@ -358,7 +308,7 @@ impl PolkadotAdapter {
     /// This task periodically checks the health of the connection and updates
     /// metrics accordingly.
     fn start_health_monitor(
-        client: Arc<OnlineClient<SubxtPolkadotConfig>>,
+        client: OnlineClient<SubxtPolkadotConfig>,
         health_metrics: Arc<Mutex<HealthMetrics>>,
         check_interval: Duration,
     ) -> tokio::task::JoinHandle<()> {
@@ -372,47 +322,57 @@ impl PolkadotAdapter {
                 interval_timer.tick().await;
                 
                 // Perform health check
-                let health_result = timeout(
+                let health_result = match timeout(
                     DEFAULT_RPC_TIMEOUT,
-                    client.blocks().at_latest().await?.header()
-                ).await;
-                
-                let mut metrics = health_metrics.lock().await;
-                metrics.last_updated = Instant::now();
-                
-                match health_result {
-                    Ok(Ok(Some(header))) => {
-                        debug!("Health check passed - block #{}", header.number);
-                        metrics.connection_status = ConnectionStatus::Healthy;
-                        metrics.consecutive_failures = 0;
-                        metrics.latest_block_seen = Some(header.number);
-                        metrics.last_successful_call = Some(Instant::now());
-                    },
-                    Ok(Ok(None)) => {
-                        warn!("Health check: No block header received");
-                        metrics.consecutive_failures += 1;
-                        metrics.connection_status = if metrics.consecutive_failures > MAX_CONSECUTIVE_HEALTH_FAILURES {
-                            ConnectionStatus::Unhealthy
-                        } else {
-                            ConnectionStatus::Degraded
-                        };
-                    },
-                    Ok(Err(e)) => {
-                        warn!("Health check failed: {}", e);
-                        metrics.consecutive_failures += 1;
-                        metrics.connection_status = if metrics.consecutive_failures > MAX_CONSECUTIVE_HEALTH_FAILURES {
-                            ConnectionStatus::Unhealthy
-                        } else {
-                            ConnectionStatus::Degraded
-                        };
+                    client.blocks().at_latest()
+                ).await {
+                    Ok(block_result) => {
+                        match block_result {
+                            Ok(block) => {
+                                let header = block.header();
+                                debug!("Health check passed - block #{}", header.number);
+                                let mut metrics = health_metrics.lock().await;
+                                metrics.connection_status = ConnectionStatus::Healthy;
+                                metrics.consecutive_failures = 0;
+                                metrics.latest_block_seen = Some(header.number);
+                                metrics.last_successful_call = Some(Instant::now());
+                                metrics.last_successful_timestamp = Some(SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64);
+                                metrics.last_updated = Some(Instant::now());
+                                metrics.last_updated_timestamp = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
+                            },
+                            Err(e) => {
+                                warn!("Failed to get latest block: {}", e);
+                                let mut metrics = health_metrics.lock().await;
+                                metrics.consecutive_failures += 1;
+                                metrics.connection_status = ConnectionStatus::Unhealthy;
+                                metrics.last_updated = Some(Instant::now());
+                                metrics.last_updated_timestamp = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
+                            }
+                        }
                     },
                     Err(_) => {
                         warn!("Health check timed out");
+                        let mut metrics = health_metrics.lock().await;
                         metrics.consecutive_failures += 1;
                         metrics.connection_status = ConnectionStatus::Unhealthy;
+                        metrics.last_updated = Some(Instant::now());
+                        metrics.last_updated_timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis() as u64;
                     }
-                }
-                
+                };
+
+                let metrics = health_metrics.lock().await;
                 if metrics.consecutive_failures > 0 {
                     debug!(
                         "Health monitor - consecutive failures: {}, status: {:?}",
@@ -521,12 +481,21 @@ impl PolkadotAdapter {
     async fn update_success_metrics(&self, response_time: Duration) {
         let mut metrics = self.health_metrics.lock().await;
         metrics.last_successful_call = Some(Instant::now());
+        metrics.last_successful_timestamp = Some(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64);
         metrics.consecutive_failures = 0;
         metrics.total_calls += 1;
-        metrics.last_updated = Instant::now();
+        metrics.last_updated = Some(Instant::now());
+        metrics.last_updated_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         
         // Update connection status if it was degraded
-        if metrics.connection_status != ConnectionStatus::Healthy {
+        if metrics.connection_status == ConnectionStatus::Degraded || 
+           metrics.connection_status == ConnectionStatus::Unhealthy {
             metrics.connection_status = ConnectionStatus::Healthy;
             info!("Connection status restored to healthy");
         }
@@ -558,7 +527,11 @@ impl PolkadotAdapter {
         metrics.consecutive_failures += 1;
         metrics.total_calls += 1;
         metrics.failed_calls += 1;
-        metrics.last_updated = Instant::now();
+        metrics.last_updated = Some(Instant::now());
+        metrics.last_updated_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         
         // Update connection status based on consecutive failures
         metrics.connection_status = match metrics.consecutive_failures {
@@ -612,6 +585,32 @@ impl PolkadotAdapter {
         let mapping = self.message_tx_mapping.read().await;
         mapping.get(message_id).cloned()
     }
+
+    /// Retrieves the latest finalized block number
+    #[instrument(level = "debug", skip(self))]
+    async fn latest_block(&self) -> Result<u32, AdapterError> {
+        debug!("Fetching latest block number");
+        
+        let block = self.client.blocks().at_latest().await
+            .map_err(|e| AdapterError::Network(format!("Failed to get latest block: {}", e)))?;
+            
+        let header = block.header();
+        let block_number = header.number;
+        debug!("Latest block number: {}", block_number);
+        
+        // Update health metrics with latest block
+        {
+            let mut metrics = self.health_metrics.lock().await;
+            metrics.latest_block_seen = Some(block_number);
+            metrics.last_updated = Some(Instant::now());
+            metrics.last_updated_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+        }
+        
+        Ok(block_number)
+    }
 }
 
 #[async_trait]
@@ -625,21 +624,12 @@ impl ChainAdapter for PolkadotAdapter {
     async fn latest_block(&self) -> Result<Self::BlockId, Self::Error> {
         debug!("Fetching latest block number");
         
-        let header = self.execute_rpc_call(|| async {
-            self.client.blocks().at(block_hash).header().await
-        }).await?;
-        
-        let block_number = header
-            .ok_or_else(|| AdapterError::Network("No block header found".to_string()))?
-            .number;
+        let block = self.client.blocks().at_latest().await
+            .map_err(|e| AdapterError::Network(format!("Failed to get latest block: {}", e)))?;
             
+        let header = block.header();
+        let block_number = header.number;
         debug!("Latest block number: {}", block_number);
-        
-        // Update health metrics with latest block
-        {
-            let mut metrics = self.health_metrics.lock().await;
-            metrics.latest_block_seen = Some(block_number);
-        }
         
         Ok(block_number)
     }
@@ -1096,34 +1086,19 @@ impl PolkadotAdapter {
         Ok(0) // Placeholder
     }
     
-    /// Converts Substrate events to MessageEvent format
+    /// Converts a Substrate event to a Frostgate message event
     ///
-    /// Helper method to transform Substrate-specific events into the
-    /// common MessageEvent format used by the Frostgate protocol.
-    fn _convert_substrate_event_to_message_event(
+    /// This method handles the conversion of chain-specific events into
+    /// the standardized Frostgate message format.
+    fn _convert_substrate_event_to_message_event<T>(
         &self,
-        _event: subxt::events::StaticEvent,
-    ) -> Result<MessageEvent, AdapterError> {
+        _event: T,
+    ) -> Result<MessageEvent, AdapterError>
+    where
+        T: subxt::events::StaticEvent,
+    {
         // TODO: Implement event conversion logic
-        // This would decode Substrate events and map them to MessageEvent
-        
-        // Example:
-        // match (event.pallet_name(), event.variant_name()) {
-        //     ("XcmpQueue", "XcmpMessageSent") => {
-        //         let event_data = event.field_values()?;
-        //         Ok(MessageEvent {
-        //             message_id: extract_message_id_from_event(&event_data)?,
-        //             event_type: MessageEventType::Sent,
-        //             block_number: Some(block_number),
-        //             timestamp: Some(Instant::now()),
-        //             additional_data: Some(event_data),
-        //         })
-        //     }
-        //     _ => Err(AdapterError::Other("Unknown event type".to_string()))
-        // }
-        
-        // Placeholder implementation
-        Err(AdapterError::Other("Event conversion not implemented".to_string()))
+        unimplemented!("Event conversion not yet implemented")
     }
 }
 
@@ -1196,15 +1171,22 @@ mod tests {
     
     #[test]
     fn test_health_metrics_default() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+            
         let metrics = HealthMetrics {
             last_successful_call: None,
+            last_successful_timestamp: None,
             consecutive_failures: 0,
             total_calls: 0,
             failed_calls: 0,
             avg_response_time: Duration::ZERO,
             connection_status: ConnectionStatus::Unknown,
+            last_updated: None,
+            last_updated_timestamp: now,
             latest_block_seen: None,
-            last_updated: Instant::now(),
         };
         
         assert_eq!(metrics.consecutive_failures, 0);

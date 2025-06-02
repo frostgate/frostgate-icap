@@ -1,36 +1,36 @@
 [package]
 name = "frostgate-icap"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
+frostgate-sdk = { path = "../frostgate-sdk" }
+frostgate-zkip = { path = "../frostgate-zkip" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-uuid = { workspace = true }
-hex = { workspace = true }
 async-trait = { workspace = true }
-bincode.workspace = true
-sha2 = "0.10.9"
-tokio.workspace = true
-num_cpus = "1.16.0"
-frostgate-sdk = { path = "../frostgate-sdk" }
-frostgate-prover = { path = "../frostgate-prover" }
-frostgate-verifier = { path = "../frostgate-verifier" }
-frostgate-zkip = { path = "../frostgate-zkip" }
-ethers.workspace = true
+ethers = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+bincode = { workspace = true }
+reqwest = { workspace = true }
+
+# Solana dependencies
+solana-sdk = { workspace = true }
 solana-client = { workspace = true }
-base64 = { workspace = true }
-log = "0.4.27"
-solana-sdk = "2.2.2"
-solana-transaction-status = "2.2.7"
-reqwest = "0.11"
-tracing = "0.1.41"
-subxt = { version = "0.42.1" }
-subxt-signer = { version = "0.42.1", features = ["sr25519"] }
-sp-keyring = "30.0" 
-sp-core = "30.0"
+solana-transaction-status = { workspace = true }
+solana-program = { workspace = true }
+
+# Substrate dependencies
+subxt = { workspace = true }
+subxt-signer = { workspace = true }
+sp-keyring = { workspace = true }
+sp-core = { workspace = true }
 
 [features]
+default = []
 examples = []

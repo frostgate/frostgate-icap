@@ -51,7 +51,7 @@ impl EthereumAdapter {
         
         // Create RPC client
         let timeout = config.rpc_timeout.unwrap_or(Duration::from_secs(30));
-        let client = RpcClient::new(&config.rpc_url, timeout)?;
+        let client = RpcClient::new(&config.rpc_url, timeout).await?;
         
         // Create event handler
         let event_handler = EventHandler::new(

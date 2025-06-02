@@ -1,6 +1,6 @@
-# Frostgate ICAP (Inter-Chain Adapter Protocol)
+# Frostgate ICAP (Interoperable Chain Abstraction Protocol)
 
-A robust and flexible blockchain adapter protocol implementation that provides unified interfaces for interacting with multiple blockchain networks including Ethereum, Solana, and Polkadot/Substrate chains.
+A robust and flexible protocol implementation that provides unified interfaces for interacting with multiple blockchain networks including Ethereum, Solana, and Polkadot/Substrate chains. ICAP modular design allows for intergrating new chains by implementing ChainAdapter trait for it.
 
 ## Features
 

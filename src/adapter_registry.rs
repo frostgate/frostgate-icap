@@ -9,9 +9,17 @@ use crate::chainadapter::{
 use ethers::core::k256::elliptic_curve::Error;
 use frostgate_sdk::frostmessage::*;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::fmt;
 use subxt::config::substrate::H256;
+
+/// Type alias for a dynamic chain adapter with generic block and transaction IDs
+pub type DynChainAdapter = dyn ChainAdapter<
+    Error = AdapterError,
+    BlockId = String,
+    TxId = String
+> + Send + Sync;
 
 /// Errors that can occur when working with the adapter registry
 #[derive(Debug, Clone, PartialEq)]
@@ -42,7 +50,7 @@ impl std::error::Error for AdapterRegistryError {}
 
 /// Thread-safe registry for managing chain adapters
 pub struct AdapterRegistry {
-    adapters: RwLock<HashMap<ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>>,
+    adapters: RwLock<HashMap<ChainId, Arc<DynChainAdapter>>>,
 }
 
 impl AdapterRegistry {
@@ -56,13 +64,12 @@ impl AdapterRegistry {
     /// Registers a new adapter for the specified chain ID
     /// 
     /// Returns an error if an adapter for this chain ID already exists
-    pub fn register_adapter(
+    pub async fn register_adapter(
         &self,
         chain_id: ChainId,
-        adapter: Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>,
+        adapter: Arc<DynChainAdapter>,
     ) -> Result<(), AdapterRegistryError> {
-        let mut adapters = self.adapters.write()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
+        let mut adapters = self.adapters.write().await;
 
         if adapters.contains_key(&chain_id) {
             return Err(AdapterRegistryError::AdapterAlreadyExists(chain_id));
@@ -75,67 +82,52 @@ impl AdapterRegistry {
     /// Registers or updates an adapter for the specified chain ID
     /// 
     /// If an adapter already exists for this chain ID, it will be replaced
-    pub fn register_or_update_adapter(
+    pub async fn register_or_update_adapter(
         &self,
         chain_id: ChainId,
-        adapter: Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>,
-    ) -> Result<Option<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>, AdapterRegistryError> {
-        let mut adapters = self.adapters.write()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+        adapter: Arc<DynChainAdapter>,
+    ) -> Result<Option<Arc<DynChainAdapter>>, AdapterRegistryError> {
+        let mut adapters = self.adapters.write().await;
         Ok(adapters.insert(chain_id, adapter))
     }
 
     /// Retrieves an adapter for the specified chain ID
-    pub fn get_adapter(&self, chain_id: &ChainId) -> Result<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>, AdapterRegistryError> {
-        let adapters = self.adapters.read()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+    pub async fn get_adapter(&self, chain_id: &ChainId) -> Result<Arc<DynChainAdapter>, AdapterRegistryError> {
+        let adapters = self.adapters.read().await;
         adapters.get(chain_id)
             .cloned()
-            .ok_or_else(|| AdapterRegistryError::AdapterNotFound(*chain_id)) // Implement copy here too
+            .ok_or_else(|| AdapterRegistryError::AdapterNotFound(*chain_id))
     }
 
     /// Checks if an adapter exists for the specified chain ID
-    pub fn has_adapter(&self, chain_id: &ChainId) -> Result<bool, AdapterRegistryError> {
-        let adapters = self.adapters.read()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+    pub async fn has_adapter(&self, chain_id: &ChainId) -> Result<bool, AdapterRegistryError> {
+        let adapters = self.adapters.read().await;
         Ok(adapters.contains_key(chain_id))
     }
 
     /// Removes an adapter for the specified chain ID
     /// 
     /// Returns the removed adapter if it existed
-    pub fn remove_adapter(&self, chain_id: &ChainId) -> Result<Option<Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>, AdapterRegistryError> {
-        let mut adapters = self.adapters.write()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+    pub async fn remove_adapter(&self, chain_id: &ChainId) -> Result<Option<Arc<DynChainAdapter>>, AdapterRegistryError> {
+        let mut adapters = self.adapters.write().await;
         Ok(adapters.remove(chain_id))
     }
 
     /// Returns a list of all registered chain IDs
-    pub fn list_chain_ids(&self) -> Result<Vec<ChainId>, AdapterRegistryError> {
-        let adapters = self.adapters.read()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
-        // Implement copy here, this should solve the problem here
+    pub async fn list_chain_ids(&self) -> Result<Vec<ChainId>, AdapterRegistryError> {
+        let adapters = self.adapters.read().await;
         Ok(adapters.keys().copied().collect())
     }
 
     /// Returns the number of registered adapters
-    pub fn count(&self) -> Result<usize, AdapterRegistryError> {
-        let adapters = self.adapters.read()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+    pub async fn count(&self) -> Result<usize, AdapterRegistryError> {
+        let adapters = self.adapters.read().await;
         Ok(adapters.len())
     }
 
     /// Clears all registered adapters
-    pub fn clear(&self) -> Result<(), AdapterRegistryError> {
-        let mut adapters = self.adapters.write()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+    pub async fn clear(&self) -> Result<(), AdapterRegistryError> {
+        let mut adapters = self.adapters.write().await;
         adapters.clear();
         Ok(())
     }
@@ -143,22 +135,19 @@ impl AdapterRegistry {
     /// Executes a closure with read access to all adapters
     /// 
     /// This is useful for operations that need to work with multiple adapters atomically
-    pub fn with_adapters<F, R>(&self, f: F) -> Result<R, AdapterRegistryError>
+    pub async fn with_adapters<F, R>(&self, f: F) -> Result<R, AdapterRegistryError>
     where
-        F: FnOnce(&HashMap<ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>>) -> R,
+        F: FnOnce(&HashMap<ChainId, Arc<DynChainAdapter>>) -> R,
     {
-        let adapters = self.adapters.read()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
-
+        let adapters = self.adapters.read().await;
         Ok(f(&*adapters))
     }
 
     /// Bulk register multiple adapters
     /// 
     /// If any registration fails, all previous registrations in this batch are rolled back
-    pub fn bulk_register(&self, adapters: Vec<(ChainId, Arc<dyn ChainAdapter<BlockId = u32, TxId = H256, Error = AdapterError>>)>) -> Result<(), AdapterRegistryError> {
-        let mut registry = self.adapters.write()
-            .map_err(|e| AdapterRegistryError::LockError(e.to_string()))?;
+    pub async fn bulk_register(&self, adapters: Vec<(ChainId, Arc<DynChainAdapter>)>) -> Result<(), AdapterRegistryError> {
+        let mut registry = self.adapters.write().await;
 
         // Check for conflicts first
         for (chain_id, _) in &adapters {
@@ -182,38 +171,19 @@ impl Default for AdapterRegistry {
     }
 }
 
-// Thread-safe clone implementation
-impl Clone for AdapterRegistry {
-    fn clone(&self) -> Self {
-        let adapters = self.adapters.read().expect("Failed to acquire read lock for cloning");
-        Self {
-            adapters: RwLock::new(adapters.clone()),
-        }
-    }
-}
-
 impl fmt::Debug for AdapterRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.adapters.read() {
-            Ok(adapters) => {
-                f.debug_struct("AdapterRegistry")
-                    .field("chain_ids", &adapters.keys().collect::<Vec<_>>())
-                    .field("count", &adapters.len())
-                    .finish()
-            }
-            Err(_) => {
-                f.debug_struct("AdapterRegistry")
-                    .field("error", &"Failed to acquire read lock")
-                    .finish()
-            }
-        }
+        f.debug_struct("AdapterRegistry")
+            .field("adapters", &"<opaque>")
+            .finish()
     }
 }
 
-//#[cfg(test)]
-/* mod tests {
+#[cfg(test)]
+mod tests {
     use super::*;
     use async_trait::async_trait;
+    use uuid::Uuid;
 
     // Mock adapter for testing
     struct MockAdapter {
@@ -222,12 +192,12 @@ impl fmt::Debug for AdapterRegistry {
 
     #[async_trait]
     impl ChainAdapter for MockAdapter {
-        type BlockId = u32;
-        type TxId = H256;
+        type BlockId = String;
+        type TxId = String;
         type Error = AdapterError;
 
         async fn latest_block(&self) -> Result<Self::BlockId, Self::Error> {
-            Ok(0)
+            Ok("0".to_string())
         }
 
         async fn get_transaction(&self, _tx: &Self::TxId) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -239,115 +209,103 @@ impl fmt::Debug for AdapterRegistry {
         }
 
         async fn submit_message(&self, _msg: &FrostMessage) -> Result<Self::TxId, Self::Error> {
-            Ok(H256::zero())
+            Ok("0x0".to_string())
         }
 
         async fn listen_for_events(&self) -> Result<Vec<MessageEvent>, Self::Error> {
             Ok(vec![])
         }
 
+        async fn verify_on_chain(&self, _msg: &FrostMessage) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
         async fn estimate_fee(&self, _msg: &FrostMessage) -> Result<u128, Self::Error> {
             Ok(0)
+        }
+
+        async fn message_status(&self, _id: &Uuid) -> Result<MessageStatus, Self::Error> {
+            Ok(MessageStatus::Pending)
         }
 
         async fn health_check(&self) -> Result<(), Self::Error> {
             Ok(())
         }
-
-        async fn message_status(&self, _id: &uuid::Uuid) -> Result<MessageStatus, Self::Error> {
-            Ok(MessageStatus::Pending)
-        }
-
-        async fn verify_on_chain(&self, _msg: &FrostMessage) -> Result<(), Self::Error> {
-            Ok(())
-        }
     }
 
-    #[test]
-    fn test_register_and_get_adapter() {
+    #[tokio::test]
+    async fn test_register_and_get_adapter() {
         let registry = AdapterRegistry::new();
-        let chain_id = ChainId::from(1u64);
-        let adapter = Arc::new(MockAdapter { chain_id });
+        let adapter = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
 
-        // Register adapter
-        assert!(registry.register_adapter(chain_id, adapter.clone()).is_ok());
-
-        // Retrieve adapter
-        let retrieved = registry.get_adapter(&chain_id).unwrap();
-        assert_eq!(Arc::as_ptr(&adapter), Arc::as_ptr(&retrieved));
+        registry.register_adapter(ChainId::Ethereum, adapter.clone()).await.unwrap();
+        let retrieved = registry.get_adapter(&ChainId::Ethereum).await.unwrap();
+        assert!(Arc::ptr_eq(&adapter, &retrieved));
     }
 
-    #[test]
-    fn test_duplicate_registration_fails() {
+    #[tokio::test]
+    async fn test_duplicate_registration_fails() {
         let registry = AdapterRegistry::new();
-        let chain_id = ChainId::try_into(1u64).unwrap();
-        let adapter1 = Arc::new(MockAdapter { chain_id });
-        let adapter2 = Arc::new(MockAdapter { chain_id });
+        let adapter = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
 
-        // First registration should succeed
-        assert!(registry.register_adapter(chain_id, adapter1).is_ok());
-
-        // Second registration should fail
-        let result = registry.register_adapter(chain_id, adapter2);
+        registry.register_adapter(ChainId::Ethereum, adapter.clone()).await.unwrap();
+        let result = registry.register_adapter(ChainId::Ethereum, adapter.clone()).await;
         assert!(matches!(result, Err(AdapterRegistryError::AdapterAlreadyExists(_))));
     }
 
-    #[test]
-    fn test_register_or_update() {
+    #[tokio::test]
+    async fn test_register_or_update() {
         let registry = AdapterRegistry::new();
-        let chain_id = ChainId::try_into(1u64).unwrap();
-        let adapter1 = Arc::new(MockAdapter { chain_id });
-        let adapter2 = Arc::new(MockAdapter { chain_id });
+        let adapter1 = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
+        let adapter2 = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
 
         // First registration
-        let result = registry.register_or_update_adapter(chain_id, adapter1.clone()).unwrap();
-        assert!(result.is_none());
+        registry.register_or_update_adapter(ChainId::Ethereum, adapter1.clone()).await.unwrap();
+        let retrieved = registry.get_adapter(&ChainId::Ethereum).await.unwrap();
+        assert!(Arc::ptr_eq(&adapter1, &retrieved));
 
-        // Update registration
-        let result = registry.register_or_update_adapter(chain_id, adapter2.clone()).unwrap();
-        assert!(result.is_some());
-
-        // Verify new adapter is active
-        let retrieved = registry.get_adapter(&chain_id).unwrap();
-        assert_eq!(Arc::as_ptr(&adapter2), Arc::as_ptr(&retrieved));
+        // Update
+        registry.register_or_update_adapter(ChainId::Ethereum, adapter2.clone()).await.unwrap();
+        let retrieved = registry.get_adapter(&ChainId::Ethereum).await.unwrap();
+        assert!(Arc::ptr_eq(&adapter2, &retrieved));
     }
 
-    #[test]
-    fn test_nonexistent_adapter() {
+    #[tokio::test]
+    async fn test_nonexistent_adapter() {
         let registry = AdapterRegistry::new();
-        let chain_id = ChainId::from(999u64);
-
-        let result = registry.get_adapter(&chain_id);
+        let result = registry.get_adapter(&ChainId::Ethereum).await;
         assert!(matches!(result, Err(AdapterRegistryError::AdapterNotFound(_))));
     }
 
-    #[test]
-    fn test_list_chain_ids() {
+    #[tokio::test]
+    async fn test_list_chain_ids() {
         let registry = AdapterRegistry::new();
-        let chain_ids = vec![ChainId::from(1u64), ChainId::from(2u64), ChainId::from(3u64)];
+        let adapter1 = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
+        let adapter2 = Arc::new(MockAdapter { chain_id: ChainId::Solana });
 
-        for &chain_id in &chain_ids {
-            let adapter = Arc::new(MockAdapter { chain_id });
-            registry.register_adapter(chain_id, adapter).unwrap();
-        }
+        registry.register_adapter(ChainId::Ethereum, adapter1).await.unwrap();
+        registry.register_adapter(ChainId::Solana, adapter2).await.unwrap();
 
-        let mut listed_ids = registry.list_chain_ids().unwrap();
-        listed_ids.sort();
-        let mut expected_ids = chain_ids.clone();
-        expected_ids.sort();
-
-        assert_eq!(listed_ids, expected_ids);
+        let chain_ids = registry.list_chain_ids().await.unwrap();
+        assert_eq!(chain_ids.len(), 2);
+        assert!(chain_ids.contains(&ChainId::Ethereum));
+        assert!(chain_ids.contains(&ChainId::Solana));
     }
 
-    #[test]
-    fn test_bulk_register() {
+    #[tokio::test]
+    async fn test_bulk_register() {
         let registry = AdapterRegistry::new();
+        let adapter1 = Arc::new(MockAdapter { chain_id: ChainId::Ethereum });
+        let adapter2 = Arc::new(MockAdapter { chain_id: ChainId::Solana });
+
         let adapters = vec![
-            (ChainId::from(1u64), Arc::new(MockAdapter { chain_id: ChainId::from(1u64) }) as Arc<dyn ChainAdapter>),
-            (ChainId::from(2u64), Arc::new(MockAdapter { chain_id: ChainId::from(2u64) }) as Arc<dyn ChainAdapter>),
+            (ChainId::Ethereum, adapter1.clone()),
+            (ChainId::Solana, adapter2.clone()),
         ];
 
-        assert!(registry.bulk_register(adapters).is_ok());
-        assert_eq!(registry.count().unwrap(), 2);
+        registry.bulk_register(adapters).await.unwrap();
+
+        assert!(registry.has_adapter(&ChainId::Ethereum).await.unwrap());
+        assert!(registry.has_adapter(&ChainId::Solana).await.unwrap());
     }
-} */
+}

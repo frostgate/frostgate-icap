@@ -6,10 +6,10 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-mod adapter_registry;
-mod chainadapter;
-mod error;
-mod types;
+pub mod adapter_registry;
+pub mod chainadapter;
+pub mod error;
+pub mod types;
 
 pub mod evm;
 pub mod solana;
@@ -17,7 +17,7 @@ pub mod substrate;
 pub mod sui;
 
 pub use adapter_registry::AdapterRegistry;
-pub use chainadapter::ChainAdapter;
+pub use chainadapter::{ChainAdapter, AdapterError};
 pub use error::IcapError;
 pub use types::{ChainConfig, *};
 

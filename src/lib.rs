@@ -1,18 +1,24 @@
+//! Frostgate ICAP (Interoperable Chain Abstraction Protocol)
+//! 
+//! This crate provides a unified interface for interacting with multiple blockchain
+//! networks through a common abstraction layer.
+
 #![allow(unused_imports)]
+#![allow(dead_code)]
 
-pub mod adapter_registry;
-pub mod chainadapter;
+mod adapter_registry;
+mod chainadapter;
+mod error;
+mod types;
+
 pub mod evm;
-pub mod substrate;
 pub mod solana;
-pub mod types;
-pub mod error;
+pub mod substrate;
+pub mod sui;
 
-pub use chainadapter::{ChainAdapter, AdapterError};
-pub use evm::EthereumAdapter;
-pub use solana::SolanaAdapter;
-pub use substrate::PolkadotAdapter;
-pub use frostgate_sdk::frostmessage::MessageStatus;
+pub use adapter_registry::AdapterRegistry;
+pub use chainadapter::ChainAdapter;
+pub use error::IcapError;
+pub use types::{ChainConfig, *};
 
-// Re-export error types
-pub use error::*;
+pub type Result<T> = std::result::Result<T, IcapError>; 

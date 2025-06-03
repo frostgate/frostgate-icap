@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use frostgate_sdk::frostmessage::ChainId;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConnectionStatus {
@@ -97,5 +99,65 @@ impl Default for HealthMetrics {
             last_updated_timestamp: now,
             latest_block_seen: None,
         }
+    }
+}
+
+/// Configuration for connecting to and interacting with a blockchain network
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainConfig {
+    /// Chain identifier
+    pub chain_id: ChainId,
+    
+    /// RPC endpoint URL
+    pub rpc_url: String,
+    
+    /// Optional WebSocket endpoint URL
+    pub ws_url: Option<String>,
+    
+    /// Optional authentication token/API key
+    pub auth_token: Option<String>,
+    
+    /// Chain-specific contract addresses
+    pub contracts: HashMap<String, String>,
+    
+    /// Additional chain-specific configuration options
+    pub options: HashMap<String, String>,
+}
+
+impl ChainConfig {
+    /// Create a new chain configuration
+    pub fn new(chain_id: ChainId, rpc_url: String) -> Self {
+        Self {
+            chain_id,
+            rpc_url,
+            ws_url: None,
+            auth_token: None,
+            contracts: HashMap::new(),
+            options: HashMap::new(),
+        }
+    }
+    
+    /// Add a contract address
+    pub fn with_contract(mut self, name: &str, address: &str) -> Self {
+        self.contracts.insert(name.to_string(), address.to_string());
+        self
+    }
+    
+    /// Add a configuration option
+    pub fn with_option(mut self, key: &str, value: &str) -> Self {
+        self.options.insert(key.to_string(), value.to_string());
+        self
+    }
+    
+    /// Set WebSocket URL
+    pub fn with_ws_url(mut self, ws_url: String) -> Self {
+        self.ws_url = Some(ws_url);
+        self
+    }
+    
+    /// Set authentication token
+    pub fn with_auth_token(mut self, token: String) -> Self {
+        self.auth_token = Some(token);
+        self
     }
 }

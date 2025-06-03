@@ -6,6 +6,25 @@ use solana_client::{
     rpc_request::RpcRequest,
 };
 use anyhow::Error as AnyhowError;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum IcapError {
+    #[error("Chain adapter error: {0}")]
+    ChainAdapter(#[from] AdapterError),
+    
+    #[error("Invalid configuration: {0}")]
+    Config(String),
+    
+    #[error("Network error: {0}")]
+    Network(String),
+    
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+    
+    #[error("Unknown error: {0}")]
+    Unknown(String),
+}
 
 impl From<ProviderError> for AdapterError {
     fn from(error: ProviderError) -> Self {

@@ -29,7 +29,7 @@ use crate::substrate::types::{
     DEFAULT_MAX_CONCURRENT_REQUESTS,
 };
 use crate::substrate::client::RpcClient;
-use crate::substrate::event::EventHandler;
+use crate::substrate::events::EventHandler;
 use frostgate_sdk::frostmessage::{FrostMessage, MessageEvent, MessageStatus};
 
 /// Polkadot/Substrate chain adapter

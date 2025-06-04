@@ -11,6 +11,7 @@ use subxt::utils::{H256, AccountId32};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use uuid::Uuid;
+use crate::types::ConnectionStatus;
 
 /// Default number of confirmations required for Substrate finality
 pub const DEFAULT_CONFIRMATIONS: u32 = 12;
@@ -130,6 +131,67 @@ pub enum TxTrackingStatus {
     Failed,
     /// Transaction status is unknown
     Unknown,
+}
+
+/// Statistics for individual API calls
+#[derive(Debug, Clone, Default)]
+pub struct ApiCallStats {
+    /// Total number of calls made
+    pub total_calls: u64,
+    /// Number of successful calls
+    pub successful_calls: u64,
+    /// Number of failed calls
+    pub failed_calls: u64,
+    /// Total latency across all calls
+    pub total_latency: Duration,
+    /// Average latency
+    pub average_latency: Duration,
+    /// Maximum latency observed
+    pub max_latency: Duration,
+    /// Last error message
+    pub last_error: Option<String>,
+}
+
+/// Extended health metrics for the adapter
+#[derive(Debug, Clone)]
+pub struct AdapterMetrics {
+    /// Connection status
+    pub connection_status: ConnectionStatus,
+    /// Last successful API call
+    pub last_successful_call: Option<Instant>,
+    /// Number of consecutive failures
+    pub consecutive_failures: u32,
+    /// Latest block number seen
+    pub latest_block_seen: Option<u32>,
+    /// Last error message
+    pub last_error: Option<String>,
+    /// Last successful timestamp
+    pub last_successful_timestamp: Option<u64>,
+    /// API call statistics by operation
+    pub api_calls: HashMap<String, ApiCallStats>,
+    /// Memory usage in KB
+    pub memory_usage: Option<u64>,
+    /// Number of open file descriptors
+    pub open_file_descriptors: Option<u64>,
+    /// Number of threads
+    pub thread_count: Option<u64>,
+}
+
+impl Default for AdapterMetrics {
+    fn default() -> Self {
+        Self {
+            connection_status: ConnectionStatus::Unknown,
+            last_successful_call: None,
+            consecutive_failures: 0,
+            latest_block_seen: None,
+            last_error: None,
+            last_successful_timestamp: None,
+            api_calls: HashMap::new(),
+            memory_usage: None,
+            open_file_descriptors: None,
+            thread_count: None,
+        }
+    }
 }
 
 impl PolkadotConfig {

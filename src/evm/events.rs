@@ -156,7 +156,7 @@ impl EventHandler {
             if let Some(receipt) = receipt {
                 if receipt.status == Some(U64::from(1)) {
                     // Transaction was successful
-                    Ok(())
+        Ok(())
                 } else {
                     Err(AdapterError::InvalidMessage("Transaction failed".into()))
                 }

@@ -10,16 +10,26 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::str::FromStr;
 use async_trait::async_trait;
 use subxt::{
+    self,
     OnlineClient, PolkadotConfig as SubxtPolkadotConfig,
-    tx::{TxStatus, TxProgress},
+    tx::{PairSigner, TxStatus, TxProgress, TxInBlock, Signer},
     utils::H256,
+    config::{ExtrinsicParams, substrate::H256 as SubxtHash, Config},
+    metadata::Metadata,
+    blocks::{BlockRef, Block},
+    backend::legacy::rpc_methods::RuntimeVersion,
 };
+use sp_keyring::AccountKeyring;
+use subxt::ext::sp_core::{sr25519::Pair as Sr25519Pair, Pair};
 use subxt_signer::sr25519::Keypair as SubxtKeypair;
 use subxt_signer::SecretUri;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, interval, MissedTickBehavior};
 use tracing::{debug, error, info, warn, instrument, span, Level};
 use uuid::Uuid;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use serde_json;
 
 use crate::chainadapter::{ChainAdapter, AdapterError};
 use crate::types::{HealthMetrics, ConnectionStatus};
@@ -54,6 +64,15 @@ pub struct PolkadotAdapter {
     
     /// Background health monitor task handle
     _health_monitor_handle: tokio::task::JoinHandle<()>,
+    
+    /// Cached metadata for the chain
+    metadata_cache: Arc<RwLock<Option<Metadata>>>,
+    
+    /// Hash of the current metadata
+    metadata_hash: Arc<RwLock<Option<SubxtHash>>>,
+    
+    /// Current runtime version
+    runtime_version: Arc<RwLock<Option<RuntimeVersion>>>,
 }
 
 impl PolkadotAdapter {
@@ -100,7 +119,14 @@ impl PolkadotAdapter {
             health_metrics,
             signer: Arc::new(signer),
             _health_monitor_handle: health_monitor_handle,
+            metadata_cache: Arc::new(RwLock::new(None)),
+            metadata_hash: Arc::new(RwLock::new(None)),
+            runtime_version: Arc::new(RwLock::new(None)),
         };
+        
+        // Initialize metadata and runtime version
+        adapter.update_metadata().await?;
+        adapter.update_runtime_version().await?;
         
         // Perform initial health check
         adapter.health_check().await?;
@@ -179,6 +205,178 @@ impl PolkadotAdapter {
             );
         }
     }
+
+    /// Monitors transaction progress and updates status
+    async fn monitor_transaction_progress(
+        &self,
+        message_id: Uuid,
+        mut progress: TxProgress<SubxtPolkadotConfig, OnlineClient<SubxtPolkadotConfig>>,
+    ) {
+        while let Some(status) = progress.next().await {
+            match status {
+                Ok(status) => {
+                    if let Some(block_ref) = status.as_in_block() {
+                        // Get block number from the block hash
+                        let client = self.client.client();
+                        // Extract the block hash from TxInBlock
+                        let block_hash = block_ref.block_hash();
+                        if let Ok(block) = client.blocks().at(block_hash).await {
+                            let block_number = block.header().number;
+                            self.update_transaction_status(
+                                &message_id,
+                                TxTrackingStatus::InBlock,
+                                Some(block_number),
+                                None,
+                            ).await;
+                        }
+                    } else if status.as_finalized().is_some() {
+                        self.update_transaction_status(
+                            &message_id,
+                            TxTrackingStatus::Finalized,
+                            None,
+                            None,
+                        ).await;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Transaction failed for message {}: {}", message_id, e);
+                    self.update_transaction_status(
+                        &message_id,
+                        TxTrackingStatus::Failed,
+                        None,
+                        Some(e.to_string()),
+                    ).await;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Updates the chain metadata if it has changed
+    async fn update_metadata(&self) -> Result<(), AdapterError> {
+        let client = self.client.client();
+        
+        // Get current metadata hash
+        let metadata = client.metadata();
+        let new_hash = H256::from_slice(&metadata.hasher().hash());
+        
+        // Check if metadata has changed
+        let mut hash_lock = self.metadata_hash.write().await;
+        if hash_lock.as_ref() != Some(&new_hash) {
+            info!("Chain metadata updated, hash: {:?}", new_hash);
+            
+            // Update cache
+            let mut cache_lock = self.metadata_cache.write().await;
+            *cache_lock = Some(metadata.clone());
+            *hash_lock = Some(new_hash);
+            
+            // Validate metadata contains our pallet
+            self.validate_metadata(&metadata).await?;
+        }
+        
+        Ok(())
+    }
+    
+    /// Validates that the metadata contains our required pallet and calls
+    async fn validate_metadata(&self, metadata: &Metadata) -> Result<(), AdapterError> {
+        let pallet_name = self.config.message_pallet.as_deref().unwrap_or("XcmpQueue");
+        
+        // Check pallet exists
+        let pallet = metadata.pallet_by_name(pallet_name)
+            .ok_or_else(|| AdapterError::Configuration(
+                format!("Pallet {} not found in metadata", pallet_name)
+            ))?;
+            
+        // Check required calls exist
+        let variants = pallet.call_variants().ok_or_else(|| 
+            AdapterError::Configuration("Failed to get call variants".to_string())
+        )?;
+        
+        let _submit_message = variants.iter()
+            .find(|call| call.name == "submit_message")
+            .ok_or_else(|| AdapterError::Configuration(
+                format!("Required call 'submit_message' not found in pallet {}", pallet_name)
+            ))?;
+            
+        // Check required events exist
+        let event_variants = pallet.event_variants().ok_or_else(|| 
+            AdapterError::Configuration("Failed to get event variants".to_string())
+        )?;
+        
+        let _message_sent = event_variants.iter()
+            .find(|event| event.name == "MessageSent")
+            .ok_or_else(|| AdapterError::Configuration(
+                format!("Required event 'MessageSent' not found in pallet {}", pallet_name)
+            ))?;
+            
+        Ok(())
+    }
+    
+    /// Updates the runtime version if it has changed
+    async fn update_runtime_version(&self) -> Result<(), AdapterError> {
+        let client = self.client.client();
+        // Get current runtime version from the backend
+        let backend_version = client.backend().current_runtime_version()
+            .await
+            .map_err(|e| AdapterError::Other(format!("Failed to get runtime version: {}", e)))?;
+            
+        // Convert from subxt::backend::RuntimeVersion to subxt::backend::legacy::rpc_methods::RuntimeVersion
+        let mut other = std::collections::HashMap::new();
+        other.insert("specVersion".to_string(), serde_json::Value::Number(serde_json::Number::from(backend_version.spec_version)));
+        other.insert("transactionVersion".to_string(), serde_json::Value::Number(serde_json::Number::from(backend_version.transaction_version)));
+        
+        let new_version = subxt::backend::legacy::rpc_methods::RuntimeVersion {
+            spec_version: backend_version.spec_version,
+            transaction_version: backend_version.transaction_version,
+            other,
+        };
+        
+        let mut version_lock = self.runtime_version.write().await;
+        if version_lock.as_ref() != Some(&new_version) {
+            info!(
+                "Runtime version updated: spec_version={}, transaction_version={}",
+                backend_version.spec_version, backend_version.transaction_version
+            );
+            *version_lock = Some(new_version);
+        }
+        
+        Ok(())
+    }
+    
+    /// Checks for runtime upgrades
+    async fn check_runtime_upgrade(&self) -> Result<bool, AdapterError> {
+        let old_version = {
+            let version_lock = self.runtime_version.read().await;
+            version_lock.clone()
+        };
+        
+        self.update_runtime_version().await?;
+        
+        let new_version = {
+            let version_lock = self.runtime_version.read().await;
+            version_lock.clone()
+        };
+        
+        Ok(old_version != new_version)
+    }
+}
+
+impl Clone for PolkadotAdapter {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            event_handler: self.event_handler.clone(),
+            config: self.config.clone(),
+            message_tx_mapping: Arc::clone(&self.message_tx_mapping),
+            health_metrics: Arc::clone(&self.health_metrics),
+            signer: Arc::clone(&self.signer),
+            _health_monitor_handle: tokio::spawn(async {}),
+            metadata_cache: Arc::clone(&self.metadata_cache),
+            metadata_hash: Arc::clone(&self.metadata_hash),
+            runtime_version: Arc::clone(&self.runtime_version),
+        }
+    }
 }
 
 #[async_trait]
@@ -232,18 +430,52 @@ impl ChainAdapter for PolkadotAdapter {
         }
     }
 
+    /// Submits a message to the chain
     async fn submit_message(&self, msg: &FrostMessage) -> Result<Self::TxId, Self::Error> {
         info!("Submitting message {} to chain", msg.id);
         
-        // TODO: Implement actual message submission
-        // This would involve:
-        // 1. Constructing the appropriate pallet call
-        // 2. Signing and submitting the extrinsic
-        // 3. Monitoring transaction progress
+        // Check for runtime upgrades before submitting
+        if self.check_runtime_upgrade().await? {
+            // Metadata might have changed with runtime
+            self.update_metadata().await?;
+        }
         
-        // For now, return a random hash
-        let tx_hash = H256::random();
+        let client = self.client.client();
         
+        // Create the call arguments
+        use subxt::ext::scale_value::{Value, Composite, Primitive};
+        let call_args = vec![
+            Value::primitive(Primitive::U128(msg.from_chain as u128)),
+            Value::primitive(Primitive::U128(msg.to_chain as u128)),
+            Value::from_bytes(msg.payload.clone()),
+            Value::primitive(Primitive::U128(msg.nonce as u128)),
+            Value::primitive(Primitive::U128(msg.timestamp as u128)),
+            Value::primitive(Primitive::U128(msg.fee.unwrap_or(0u128))),
+        ];
+        
+        // Create a dynamic payload
+        let call = subxt::dynamic::tx(
+            "FrostgateMessage",
+            "submit_message",
+            Composite::from(call_args),
+        );
+        
+        // Create PairSigner from our keypair
+        let pair_signer = PairSigner::new(Sr25519Pair::from_string(&self.config.signer_seed, None)
+            .map_err(|e| AdapterError::Other(format!("Failed to create signer: {}", e)))?);
+            
+        // Create and sign the extrinsic
+        let tx = client.tx()
+            .create_signed(&call, &pair_signer, Default::default())
+            .await
+            .map_err(|e| AdapterError::Other(format!("Failed to create transaction: {}", e)))?;
+            
+        // Submit and wait for in-block
+        let tx_progress = tx.submit_and_watch().await
+            .map_err(|e| AdapterError::Network(format!("Failed to submit transaction: {}", e)))?;
+            
+        // Store initial transaction info
+        let tx_hash = tx_progress.extrinsic_hash();
         let tx_info = TransactionInfo {
             message_id: msg.id,
             tx_hash,
@@ -256,7 +488,16 @@ impl ChainAdapter for PolkadotAdapter {
         
         let mut mapping = self.message_tx_mapping.write().await;
         mapping.insert(msg.id, tx_info);
+        drop(mapping);
         
+        // Monitor transaction progress
+        let this = self.clone();
+        let message_id = msg.id;
+        tokio::spawn(async move {
+            this.monitor_transaction_progress(message_id, tx_progress).await;
+        });
+        
+        info!("Message {} submitted with tx hash {}", msg.id, tx_hash);
         Ok(tx_hash)
     }
 
@@ -269,9 +510,42 @@ impl ChainAdapter for PolkadotAdapter {
         Ok(())
     }
 
-    async fn estimate_fee(&self, _msg: &FrostMessage) -> Result<u128, Self::Error> {
-        // TODO: Implement actual fee estimation
-        Ok(1_000_000_000_000) // 1 DOT in Planck
+    async fn estimate_fee(&self, msg: &FrostMessage) -> Result<u128, Self::Error> {
+        let client = self.client.client();
+        
+        use subxt::ext::scale_value::{Value, Composite, Primitive};
+        
+        // Create the call arguments with explicit types
+        let call_args = vec![
+            Value::primitive(Primitive::u128(msg.from_chain as u128)),
+            Value::primitive(Primitive::u128(msg.to_chain as u128)),
+            Value::from_bytes(msg.payload.clone()),
+            Value::primitive(Primitive::u128(msg.nonce as u128)),
+            Value::primitive(Primitive::u128(msg.timestamp as u128)),
+            Value::primitive(Primitive::u128(msg.fee.unwrap_or(0u128))),
+        ];
+        
+        // Create the call for fee estimation
+        let call = subxt::dynamic::tx(
+            "FrostgateMessage",
+            "submit_message",
+            Composite::from(call_args),
+        );
+        
+        // Create PairSigner from our keypair
+        let pair_signer = PairSigner::new(Sr25519Pair::from_string(&self.config.signer_seed, None)
+            .map_err(|e| AdapterError::Other(format!("Failed to create signer: {}", e)))?);
+            
+        // Get fee estimate using the correct API
+        let tx = client.tx()
+            .create_signed(&call, &pair_signer, Default::default())
+            .await
+            .map_err(|e| AdapterError::Other(format!("Failed to create transaction: {}", e)))?;
+            
+        let fee_details = tx.partial_fee_estimate().await
+            .map_err(|e| AdapterError::Other(format!("Failed to estimate fee: {}", e)))?;
+            
+        Ok(fee_details)
     }
 
     async fn message_status(&self, id: &Uuid) -> Result<MessageStatus, Self::Error> {

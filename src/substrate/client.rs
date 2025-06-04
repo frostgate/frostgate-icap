@@ -17,7 +17,7 @@ use crate::substrate::types::{
     DEFAULT_RPC_TIMEOUT, DEFAULT_MIN_CALL_INTERVAL,
 };
 
-/// RPC client wrapper with retry and error handling capabilities
+#[derive(Clone)]
 pub struct RpcClient {
     client: OnlineClient<SubxtPolkadotConfig>,
     min_call_interval: Duration,

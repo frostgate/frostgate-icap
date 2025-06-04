@@ -24,7 +24,7 @@ use futures::StreamExt;
 
 const MAX_BLOCKS_PER_QUERY: u32 = 100;
 
-/// Event handler for Substrate chain events
+#[derive(Clone)]
 pub struct EventHandler {
     /// Client for chain interaction
     client: Arc<OnlineClient<SubxtPolkadotConfig>>,
@@ -51,7 +51,7 @@ impl EventHandler {
     }
 
     /// Listens for contract events
-    pub async fn listen_for_events(&self) -> Result<Vec<MessageEvent>, AdapterError> {
+    pub async fn  listen_for_events(&self) -> Result<Vec<MessageEvent>, AdapterError> {
         debug!("Listening for events from pallet: {}", self.pallet_name);
 
         // Get current block

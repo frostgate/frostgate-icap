@@ -360,6 +360,62 @@ impl PolkadotAdapter {
         
         Ok(old_version != new_version)
     }
+
+    /// Internal method to handle incoming chain events
+    async fn handle_event_internal(&self, event: MessageEvent) -> Result<(), AdapterError> {
+        let span = span!(Level::INFO, "handle_event", message_id = %event.message.id);
+        let _enter = span.enter();
+        
+        info!("Processing message event: {:?}", event.message.id);
+        
+        // Update transaction status if we have a tx hash
+        if let Some(tx_hash_bytes) = event.tx_hash {
+            if tx_hash_bytes.len() == 32 {
+                let tx_hash = H256::from_slice(&tx_hash_bytes);
+                let mut mapping = self.message_tx_mapping.write().await;
+                
+                if let Some(tx_info) = mapping.get_mut(&event.message.id) {
+                    // Update block number if available
+                    if let Some(block_num) = event.block_number {
+                        tx_info.block_number = Some(block_num as u32);
+                    }
+                    
+                    // Verify the transaction hash matches
+                    if tx_info.tx_hash != tx_hash {
+                        warn!(
+                            "Transaction hash mismatch for message {}: expected {}, got {}",
+                            event.message.id, tx_info.tx_hash, tx_hash
+                        );
+                    }
+                } else {
+                    // This is a new message we haven't seen before
+                    let tx_info = TransactionInfo {
+                        message_id: event.message.id,
+                        tx_hash,
+                        block_number: event.block_number.map(|n| n as u32),
+                        status: TxTrackingStatus::InBlock,
+                        submitted_at: Instant::now(),
+                        confirmations: 0,
+                        error: None,
+                    };
+                    mapping.insert(event.message.id, tx_info);
+                    info!("Added new message {} to tracking", event.message.id);
+                }
+            } else {
+                warn!("Invalid transaction hash length for message {}", event.message.id);
+            }
+        }
+        
+        // Perform any necessary validation
+        self.verify_on_chain(&event.message).await?;
+        
+        Ok(())
+    }
+
+    /// Handles incoming chain events
+    async fn handle_event(&self, event: MessageEvent) -> Result<(), AdapterError> {
+        self.handle_event_internal(event).await
+    }
 }
 
 impl Clone for PolkadotAdapter {

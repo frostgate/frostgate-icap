@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 frostgate-sdk = { path = "../frostgate-sdk" }
 frostgate-zkip = { path = "../frostgate-zkip" }
+frostgate-circuits = { path = "../frostgate-circuits" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

@@ -185,12 +185,32 @@ impl EventHandler {
     pub async fn verify_proof(&self, event: &MessageEvent) -> Result<(), AdapterError> {
         info!("Verifying event proof for message {:?}", event);
 
-        // TODO: Implement actual on-chain proof verification
-        // This would involve:
-        // 1. Calling the pallet's verify function
-        // 2. Checking the verification result
-        // 3. Handling any errors or invalid proofs
+        // Get the proof from the message
+        let proof = event.message.proof.as_ref()
+            .ok_or_else(|| AdapterError::Other("Message has no attached proof".to_string()))?;
 
+        // Initialize SP1 plug with default config
+        let config = frostgate_circuits::sp1::Sp1PlugConfig::default();
+        let plug = frostgate_circuits::sp1::Sp1Plug::new(config);
+
+        // Serialize message data for verification
+        let mut data = Vec::new();
+        data.extend_from_slice(&event.message.from_chain.to_u64().to_be_bytes());
+        data.extend_from_slice(&event.message.to_chain.to_u64().to_be_bytes());
+        data.extend_from_slice(&event.message.payload);
+        data.extend_from_slice(&event.message.nonce.to_be_bytes());
+        data.extend_from_slice(&event.message.timestamp.to_be_bytes());
+
+        // Verify the proof
+        let is_valid = plug.verify(proof, Some(&data), None)
+            .await
+            .map_err(|e| AdapterError::Other(format!("Proof verification failed: {}", e)))?;
+
+        if !is_valid {
+            return Err(AdapterError::Other("Invalid proof".to_string()));
+        }
+
+        info!("Successfully verified proof for message {}", event.message.id);
         Ok(())
     }
 

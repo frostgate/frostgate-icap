@@ -24,6 +24,7 @@ use futures::StreamExt;
 use parity_scale_codec::Decode;
 use std::convert::TryFrom;
 use frostgate_circuits::sp1::{Sp1Plug, Sp1PlugConfig, types::Sp1ProofType};
+use frostgate_circuits::types::ProgramInfo;
 use blake2::Digest;
 
 const MAX_BLOCKS_PER_QUERY: u32 = 100;

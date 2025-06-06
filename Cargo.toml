@@ -32,6 +32,7 @@ subxt-signer = { workspace = true }
 sp-keyring = { workspace = true }
 sp-core = { workspace = true }
 blake2 = { version = "0.10.6" }
+parity-scale-codec = { version = "3.6.5", features = ["derive"] }
 
 [features]
 default = []

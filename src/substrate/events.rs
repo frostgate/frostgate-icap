@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use uuid::Uuid;
 use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
+use parity_scale_codec::Decode;
+use std::convert::TryFrom;
 
 const MAX_BLOCKS_PER_QUERY: u32 = 100;
 
@@ -115,34 +117,29 @@ impl EventHandler {
 
                 // Check if event is from our pallet and is a message event
                 if event.pallet_name() == self.pallet_name {
-                    match event.variant_name() {
-                        Some(name) if ["MessageSent", "MessageReceived", "MessageFailed"].contains(&name) => {
-                            match self.convert_event_to_message_event(&event, block_number) {
-                                Ok(message_event) => {
-                                    debug!(
-                                        "Found {} event in block {} for message {}",
-                                        name,
-                                        block_number,
-                                        message_event.message.id
-                                    );
-                                    events.push(message_event);
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to convert {} event in block {}: {}",
-                                        name,
-                                        block_number,
-                                        e
-                                    );
-                                }
+                    let variant_name = event.variant_name();
+                    if ["MessageSent", "MessageReceived", "MessageFailed"].contains(&variant_name) {
+                        match self.convert_event_to_message_event(&event, block_number) {
+                            Ok(message_event) => {
+                                debug!(
+                                    "Found {} event in block {} for message {}",
+                                    variant_name,
+                                    block_number,
+                                    message_event.message.id
+                                );
+                                events.push(message_event);
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to convert {} event in block {}: {}",
+                                    variant_name,
+                                    block_number,
+                                    e
+                                );
                             }
                         }
-                        Some(name) => {
-                            debug!("Ignoring non-message event: {}", name);
-                        }
-                        None => {
-                            warn!("Event without variant name in block {}", block_number);
-                        }
+                    } else {
+                        debug!("Ignoring non-message event: {}", variant_name);
                     }
                 }
             }
@@ -246,12 +243,11 @@ impl EventHandler {
         event: &subxt::events::EventDetails<SubxtPolkadotConfig>,
         block_number: u32,
     ) -> Result<MessageEvent, AdapterError> {
-        let variant_name = event.variant_name()
-            .ok_or_else(|| AdapterError::Other("Event variant name not found".to_string()))?;
+        let variant_name = event.variant_name();
 
         match variant_name {
             "MessageSent" => {
-                #[derive(scale::Decode)]
+                #[derive(Decode)]
                 struct MessageSentEvent {
                     from_chain: u32,
                     to_chain: u32,
@@ -262,7 +258,7 @@ impl EventHandler {
                     fee: Option<u128>,
                 }
 
-                let event_data: MessageSentEvent = event.decode()
+                let event_data: MessageSentEvent = Decode::decode(&mut &event.bytes()[..])
                     .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageSent event: {}", e)))?;
 
                 let message_id = self.generate_deterministic_uuid(
@@ -275,8 +271,10 @@ impl EventHandler {
 
                 let message = FrostMessage {
                     id: message_id,
-                    from_chain: ChainId::from(event_data.from_chain),
-                    to_chain: ChainId::from(event_data.to_chain),
+                    from_chain: ChainId::try_from(event_data.from_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid from_chain id: {}", event_data.from_chain)))?,
+                    to_chain: ChainId::try_from(event_data.to_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid to_chain id: {}", event_data.to_chain)))?,
                     payload: event_data.payload,
                     proof: None,
                     timestamp: event_data.timestamp,
@@ -297,7 +295,7 @@ impl EventHandler {
             },
 
             "MessageReceived" => {
-                #[derive(scale::Decode)]
+                #[derive(Decode)]
                 struct MessageReceivedEvent {
                     from_chain: u32,
                     to_chain: u32,
@@ -307,7 +305,7 @@ impl EventHandler {
                     timestamp: u64,
                 }
 
-                let event_data: MessageReceivedEvent = event.decode()
+                let event_data: MessageReceivedEvent = Decode::decode(&mut &event.bytes()[..])
                     .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageReceived event: {}", e)))?;
 
                 let message_id = self.generate_deterministic_uuid(
@@ -320,8 +318,10 @@ impl EventHandler {
 
                 let message = FrostMessage {
                     id: message_id,
-                    from_chain: ChainId::from(event_data.from_chain),
-                    to_chain: ChainId::from(event_data.to_chain),
+                    from_chain: ChainId::try_from(event_data.from_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid from_chain id: {}", event_data.from_chain)))?,
+                    to_chain: ChainId::try_from(event_data.to_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid to_chain id: {}", event_data.to_chain)))?,
                     payload: event_data.payload,
                     proof: None,
                     timestamp: event_data.timestamp,
@@ -342,7 +342,7 @@ impl EventHandler {
             },
 
             "MessageFailed" => {
-                #[derive(scale::Decode)]
+                #[derive(Decode)]
                 struct MessageFailedEvent {
                     from_chain: u32,
                     to_chain: u32,
@@ -351,7 +351,7 @@ impl EventHandler {
                     timestamp: u64,
                 }
 
-                let event_data: MessageFailedEvent = event.decode()
+                let event_data: MessageFailedEvent = Decode::decode(&mut &event.bytes()[..])
                     .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageFailed event: {}", e)))?;
 
                 let message_id = self.generate_deterministic_uuid(
@@ -364,8 +364,10 @@ impl EventHandler {
 
                 let message = FrostMessage {
                     id: message_id,
-                    from_chain: ChainId::from(event_data.from_chain),
-                    to_chain: ChainId::from(event_data.to_chain),
+                    from_chain: ChainId::try_from(event_data.from_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid from_chain id: {}", event_data.from_chain)))?,
+                    to_chain: ChainId::try_from(event_data.to_chain as u64)
+                        .map_err(|_| AdapterError::Other(format!("Invalid to_chain id: {}", event_data.to_chain)))?,
                     payload: event_data.payload,
                     proof: None,
                     timestamp: event_data.timestamp,

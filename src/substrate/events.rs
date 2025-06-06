@@ -19,12 +19,24 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 use uuid::Uuid;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use futures::StreamExt;
 use parity_scale_codec::Decode;
 use std::convert::TryFrom;
+use frostgate_circuits::sp1::{Sp1Plug, Sp1PlugConfig, types::Sp1ProofType};
+use blake2::Digest;
 
 const MAX_BLOCKS_PER_QUERY: u32 = 100;
+const VERIFIER_CACHE_TTL: u64 = 3600; // 1 hour TTL for verifier cache
+const MAX_VERIFIER_CACHE_SIZE: usize = 1000;
+
+/// Cache entry for verification keys
+#[derive(Clone)]
+struct VerifierCacheEntry {
+    program_info: ProgramInfo,
+    last_used: SystemTime,
+    use_count: u64,
+}
 
 #[derive(Clone)]
 pub struct EventHandler {
@@ -39,17 +51,154 @@ pub struct EventHandler {
     
     /// Event cache to deduplicate events
     event_cache: Arc<RwLock<HashMap<H256, MessageEvent>>>,
+
+    /// Cache for verification keys
+    verifier_cache: Arc<RwLock<HashMap<H256, VerifierCacheEntry>>>,
+
+    /// SP1 plug instance for verification
+    sp1_plug: Arc<Sp1Plug>,
 }
 
 impl EventHandler {
     /// Creates a new event handler
     pub fn new(client: Arc<OnlineClient<SubxtPolkadotConfig>>, pallet_name: String) -> Self {
+        // Initialize SP1 plug with default config
+        let config = Sp1PlugConfig::default();
+        let sp1_plug = Arc::new(Sp1Plug::new(config));
+
         Self {
             client,
             pallet_name,
             last_block: Arc::new(RwLock::new(None)),
             event_cache: Arc::new(RwLock::new(HashMap::new())),
+            verifier_cache: Arc::new(RwLock::new(HashMap::new())),
+            sp1_plug,
         }
+    }
+
+    /// Get or create verifier for a message
+    async fn get_or_create_verifier(&self, message: &FrostMessage) -> Result<ProgramInfo, AdapterError> {
+        // Create a unique hash for the message type/format
+        let mut hasher = blake2::Blake2b512::new();
+        hasher.update(&message.from_chain.to_u64().to_be_bytes());
+        hasher.update(&message.to_chain.to_u64().to_be_bytes());
+        if let Some(ref proof) = message.proof {
+            hasher.update(&bincode::serialize(proof).map_err(|e| AdapterError::Serialization(e.to_string()))?);
+        }
+        let hash = H256::from_slice(&hasher.finalize()[..32]);
+
+        // Try to get from cache first
+        let mut cache = self.verifier_cache.write().await;
+        
+        if let Some(entry) = cache.get_mut(&hash) {
+            // Update usage stats
+            entry.last_used = SystemTime::now();
+            entry.use_count += 1;
+            return Ok(entry.program_info.clone());
+        }
+
+        // Not in cache, create new verifier
+        let program_info = self.create_verifier(message).await?;
+
+        // Add to cache
+        cache.insert(hash, VerifierCacheEntry {
+            program_info: program_info.clone(),
+            last_used: SystemTime::now(),
+            use_count: 1,
+        });
+
+        // Cleanup old entries if needed
+        self.cleanup_verifier_cache(&mut cache).await;
+
+        Ok(program_info)
+    }
+
+    /// Create a new verifier for a message
+    async fn create_verifier(&self, message: &FrostMessage) -> Result<ProgramInfo, AdapterError> {
+        // This would normally compile the verification circuit
+        // For now, we'll use a default program that can verify our message format
+        let program_bytes = include_bytes!("../../../frostgate-circuits/programs/message_verifier.sp1");
+        
+        // Setup the program in SP1
+        let mut programs = self.sp1_plug.programs.write().await;
+        let program_hash = frostgate_circuits::sp1::prover::setup_program(
+            &self.sp1_plug.backend,
+            &mut programs,
+            program_bytes,
+        ).await.map_err(|e| AdapterError::Other(format!("Failed to setup verifier: {}", e)))?;
+
+        // Get the program info
+        let program_info = programs.entries()
+            .get(&program_hash)
+            .ok_or_else(|| AdapterError::Other("Program not found after setup".to_string()))?
+            .clone();
+
+        Ok(program_info)
+    }
+
+    /// Cleanup old entries from the verifier cache
+    async fn cleanup_verifier_cache(&self, cache: &mut HashMap<H256, VerifierCacheEntry>) {
+        let now = SystemTime::now();
+
+        // Remove expired entries
+        cache.retain(|_, entry| {
+            if let Ok(age) = now.duration_since(entry.last_used) {
+                age.as_secs() < VERIFIER_CACHE_TTL
+            } else {
+                false
+            }
+        });
+
+        // If still too large, remove least used entries
+        if cache.len() > MAX_VERIFIER_CACHE_SIZE {
+            let mut entries: Vec<_> = cache.drain().collect();
+            entries.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.use_count));
+            entries.truncate(MAX_VERIFIER_CACHE_SIZE);
+            
+            for (hash, entry) in entries {
+                cache.insert(hash, entry);
+            }
+        }
+    }
+
+    /// Verifies a message proof on-chain
+    pub async fn verify_proof(&self, event: &MessageEvent) -> Result<(), AdapterError> {
+        info!("Verifying event proof for message {:?}", event);
+
+        // Get the proof from the message
+        let proof = event.message.proof.as_ref()
+            .ok_or_else(|| AdapterError::Other("Message has no attached proof".to_string()))?;
+
+        // Convert the proof to SP1 format
+        let sp1_proof = match bincode::deserialize::<frostgate_circuits::sp1::types::Sp1ProofType>(&proof.proof) {
+            Ok(p) => p,
+            Err(e) => return Err(AdapterError::Deserialization(format!("Failed to deserialize SP1 proof: {}", e))),
+        };
+
+        // Get or create verifier
+        let program_info = self.get_or_create_verifier(&event.message).await?;
+
+        // Serialize message data for verification
+        let mut data = Vec::new();
+        data.extend_from_slice(&event.message.from_chain.to_u64().to_be_bytes());
+        data.extend_from_slice(&event.message.to_chain.to_u64().to_be_bytes());
+        data.extend_from_slice(&event.message.payload);
+        data.extend_from_slice(&event.message.nonce.to_be_bytes());
+        data.extend_from_slice(&event.message.timestamp.to_be_bytes());
+
+        // Verify the proof using cached verifier
+        let is_valid = frostgate_circuits::sp1::verifier::verify_proof(
+            &self.sp1_plug.backend,
+            &sp1_proof,
+            &program_info.verifying_key,
+        ).await.map_err(|e| AdapterError::Other(format!("Proof verification failed: {}", e)))?;
+
+        if !is_valid {
+            return Err(AdapterError::Other("Invalid proof".to_string()));
+        }
+
+        info!("Successfully verified proof for message {}", event.message.id);
+        Ok(())
     }
 
     /// Listens for contract events
@@ -179,39 +328,6 @@ impl EventHandler {
 
         debug!("Retrieved {} unique events", deduplicated_events.len());
         Ok(deduplicated_events)
-    }
-
-    /// Verifies a message proof on-chain
-    pub async fn verify_proof(&self, event: &MessageEvent) -> Result<(), AdapterError> {
-        info!("Verifying event proof for message {:?}", event);
-
-        // Get the proof from the message
-        let proof = event.message.proof.as_ref()
-            .ok_or_else(|| AdapterError::Other("Message has no attached proof".to_string()))?;
-
-        // Initialize SP1 plug with default config
-        let config = frostgate_circuits::sp1::Sp1PlugConfig::default();
-        let plug = frostgate_circuits::sp1::Sp1Plug::new(config);
-
-        // Serialize message data for verification
-        let mut data = Vec::new();
-        data.extend_from_slice(&event.message.from_chain.to_u64().to_be_bytes());
-        data.extend_from_slice(&event.message.to_chain.to_u64().to_be_bytes());
-        data.extend_from_slice(&event.message.payload);
-        data.extend_from_slice(&event.message.nonce.to_be_bytes());
-        data.extend_from_slice(&event.message.timestamp.to_be_bytes());
-
-        // Verify the proof
-        let is_valid = plug.verify(proof, Some(&data), None)
-            .await
-            .map_err(|e| AdapterError::Other(format!("Proof verification failed: {}", e)))?;
-
-        if !is_valid {
-            return Err(AdapterError::Other("Invalid proof".to_string()));
-        }
-
-        info!("Successfully verified proof for message {}", event.message.id);
-        Ok(())
     }
 
     /// Generates a deterministic UUID for a message based on its content

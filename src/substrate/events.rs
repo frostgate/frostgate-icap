@@ -51,13 +51,14 @@ impl EventHandler {
     }
 
     /// Listens for contract events
-    pub async fn  listen_for_events(&self) -> Result<Vec<MessageEvent>, AdapterError> {
+    pub async fn listen_for_events(&self) -> Result<Vec<MessageEvent>, AdapterError> {
         debug!("Listening for events from pallet: {}", self.pallet_name);
 
         // Get current block
         let current_block = self.client.blocks()
             .at_latest()
-            .await?
+            .await
+            .map_err(|e| AdapterError::Network(format!("Failed to get latest block: {}", e)))?
             .number();
 
         // Get last processed block
@@ -78,11 +79,14 @@ impl EventHandler {
         let mut events = Vec::new();
         
         // Subscribe to finalized blocks
-        let mut blocks = self.client.blocks().subscribe_finalized().await?;
+        let mut blocks = self.client.blocks()
+            .subscribe_finalized()
+            .await
+            .map_err(|e| AdapterError::Network(format!("Failed to subscribe to finalized blocks: {}", e)))?;
         
         // Process blocks as they come in
         while let Some(block) = blocks.next().await {
-            let block = block?;
+            let block = block.map_err(|e| AdapterError::Network(format!("Failed to get block: {}", e)))?;
             let block_number = block.number();
             
             // Skip blocks outside our range
@@ -109,11 +113,36 @@ impl EventHandler {
                     }
                 };
 
-                // Check if event is from our pallet
+                // Check if event is from our pallet and is a message event
                 if event.pallet_name() == self.pallet_name {
-                    // Convert event details directly
-                    if let Ok(message_event) = self.convert_event_to_message_event(&event, block_number) {
-                        events.push(message_event);
+                    match event.variant_name() {
+                        Some(name) if ["MessageSent", "MessageReceived", "MessageFailed"].contains(&name) => {
+                            match self.convert_event_to_message_event(&event, block_number) {
+                                Ok(message_event) => {
+                                    debug!(
+                                        "Found {} event in block {} for message {}",
+                                        name,
+                                        block_number,
+                                        message_event.message.id
+                                    );
+                                    events.push(message_event);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to convert {} event in block {}: {}",
+                                        name,
+                                        block_number,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Some(name) => {
+                            debug!("Ignoring non-message event: {}", name);
+                        }
+                        None => {
+                            warn!("Event without variant name in block {}", block_number);
+                        }
                     }
                 }
             }
@@ -139,9 +168,10 @@ impl EventHandler {
             }
         }
 
-        // Now update cache with new events
+        // Update cache with new events
         let mut cache = self.event_cache.write().await;
-        let mut deduplicated_events = Vec::new();
+        let mut deduplicated_events = Vec::with_capacity(new_events.len());
+        
         for (hash, event) in new_events {
             cache.insert(hash, event.clone());
             deduplicated_events.push(event);
@@ -167,43 +197,196 @@ impl EventHandler {
         Ok(())
     }
 
+    /// Generates a deterministic UUID for a message based on its content
+    fn generate_deterministic_uuid(
+        &self,
+        from_chain: u32,
+        to_chain: u32,
+        payload: &[u8],
+        nonce: u64,
+        timestamp: u64,
+    ) -> Uuid {
+        use blake2::{Blake2b512, Digest};
+        
+        // Create a unique seed by combining all message fields
+        let mut data = Vec::with_capacity(
+            8 + // from_chain
+            8 + // to_chain
+            payload.len() +
+            8 + // nonce
+            8   // timestamp
+        );
+        
+        // Add all fields in a deterministic order
+        data.extend_from_slice(&from_chain.to_be_bytes());
+        data.extend_from_slice(&to_chain.to_be_bytes());
+        data.extend_from_slice(payload);
+        data.extend_from_slice(&nonce.to_be_bytes());
+        data.extend_from_slice(&timestamp.to_be_bytes());
+        
+        // Hash the data
+        let mut hasher = Blake2b512::new();
+        hasher.update(&data);
+        let result = hasher.finalize();
+        
+        // Use first 16 bytes for UUID
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&result[..16]);
+        
+        // Set version 5 (SHA1) and variant bits
+        bytes[6] = (bytes[6] & 0x0f) | 0x50; // Version 5
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant 1
+        
+        Uuid::from_bytes(bytes)
+    }
+
     /// Converts a Substrate event to a Frostgate message event
     fn convert_event_to_message_event(
         &self,
         event: &subxt::events::EventDetails<SubxtPolkadotConfig>,
         block_number: u32,
     ) -> Result<MessageEvent, AdapterError> {
-        // Expected event fields:
-        // - from_chain: u32
-        // - to_chain: u32
-        // - sender: AccountId32
-        // - payload: Vec<u8>
-        // - nonce: u64
-        // - timestamp: u64
+        let variant_name = event.variant_name()
+            .ok_or_else(|| AdapterError::Other("Event variant name not found".to_string()))?;
 
-        // TODO: Replace with actual field extraction once we have the event structure
-        // For now, create a mock event
-        let mock_message = FrostMessage {
-            id: Uuid::new_v4(),
-            from_chain: ChainId::Polkadot,
-            to_chain: ChainId::Ethereum,
-            payload: vec![],
-            proof: None,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            nonce: 0,
-            signature: None,
-            fee: Some(0),
-            metadata: Some(HashMap::new()),
-        };
+        match variant_name {
+            "MessageSent" => {
+                #[derive(scale::Decode)]
+                struct MessageSentEvent {
+                    from_chain: u32,
+                    to_chain: u32,
+                    sender: AccountId32,
+                    payload: Vec<u8>,
+                    nonce: u64,
+                    timestamp: u64,
+                    fee: Option<u128>,
+                }
 
-        Ok(MessageEvent {
-            message: mock_message,
-            block_number: Some(block_number as u64),
-            tx_hash: None,
-        })
+                let event_data: MessageSentEvent = event.decode()
+                    .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageSent event: {}", e)))?;
+
+                let message_id = self.generate_deterministic_uuid(
+                    event_data.from_chain,
+                    event_data.to_chain,
+                    &event_data.payload,
+                    event_data.nonce,
+                    event_data.timestamp,
+                );
+
+                let message = FrostMessage {
+                    id: message_id,
+                    from_chain: ChainId::from(event_data.from_chain),
+                    to_chain: ChainId::from(event_data.to_chain),
+                    payload: event_data.payload,
+                    proof: None,
+                    timestamp: event_data.timestamp,
+                    nonce: event_data.nonce,
+                    signature: None,
+                    fee: event_data.fee,
+                    metadata: Some(HashMap::from([
+                        ("sender".to_string(), event_data.sender.to_string()),
+                        ("event_type".to_string(), "MessageSent".to_string()),
+                    ])),
+                };
+
+                Ok(MessageEvent {
+                    message,
+                    block_number: Some(block_number as u64),
+                    tx_hash: None,
+                })
+            },
+
+            "MessageReceived" => {
+                #[derive(scale::Decode)]
+                struct MessageReceivedEvent {
+                    from_chain: u32,
+                    to_chain: u32,
+                    recipient: AccountId32,
+                    payload: Vec<u8>,
+                    nonce: u64,
+                    timestamp: u64,
+                }
+
+                let event_data: MessageReceivedEvent = event.decode()
+                    .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageReceived event: {}", e)))?;
+
+                let message_id = self.generate_deterministic_uuid(
+                    event_data.from_chain,
+                    event_data.to_chain,
+                    &event_data.payload,
+                    event_data.nonce,
+                    event_data.timestamp,
+                );
+
+                let message = FrostMessage {
+                    id: message_id,
+                    from_chain: ChainId::from(event_data.from_chain),
+                    to_chain: ChainId::from(event_data.to_chain),
+                    payload: event_data.payload,
+                    proof: None,
+                    timestamp: event_data.timestamp,
+                    nonce: event_data.nonce,
+                    signature: None,
+                    fee: None,
+                    metadata: Some(HashMap::from([
+                        ("recipient".to_string(), event_data.recipient.to_string()),
+                        ("event_type".to_string(), "MessageReceived".to_string()),
+                    ])),
+                };
+
+                Ok(MessageEvent {
+                    message,
+                    block_number: Some(block_number as u64),
+                    tx_hash: None,
+                })
+            },
+
+            "MessageFailed" => {
+                #[derive(scale::Decode)]
+                struct MessageFailedEvent {
+                    from_chain: u32,
+                    to_chain: u32,
+                    payload: Vec<u8>,
+                    error: String,
+                    timestamp: u64,
+                }
+
+                let event_data: MessageFailedEvent = event.decode()
+                    .map_err(|e| AdapterError::Deserialization(format!("Failed to decode MessageFailed event: {}", e)))?;
+
+                let message_id = self.generate_deterministic_uuid(
+                    event_data.from_chain,
+                    event_data.to_chain,
+                    &event_data.payload,
+                    0, // Failed messages don't have a nonce
+                    event_data.timestamp,
+                );
+
+                let message = FrostMessage {
+                    id: message_id,
+                    from_chain: ChainId::from(event_data.from_chain),
+                    to_chain: ChainId::from(event_data.to_chain),
+                    payload: event_data.payload,
+                    proof: None,
+                    timestamp: event_data.timestamp,
+                    nonce: 0,
+                    signature: None,
+                    fee: None,
+                    metadata: Some(HashMap::from([
+                        ("error".to_string(), event_data.error),
+                        ("event_type".to_string(), "MessageFailed".to_string()),
+                    ])),
+                };
+
+                Ok(MessageEvent {
+                    message,
+                    block_number: Some(block_number as u64),
+                    tx_hash: None,
+                })
+            },
+
+            _ => Err(AdapterError::Other(format!("Unsupported event variant: {}", variant_name))),
+        }
     }
 
     /// Compute a unique hash for an event for deduplication

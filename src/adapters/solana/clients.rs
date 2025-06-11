@@ -114,25 +114,15 @@ impl SolanaRpcClient {
         self.enforce_rate_limit().await;
         
         let config = RpcTransactionConfig {
-            encoding: Some(UiTransactionEncoding::Binary),
-            commitment: Some(CommitmentConfig {
-                commitment: self.config.commitment,
-            }),
-            max_supported_transaction_version: Some(0),
+            encoding: None,
+            commitment: Some(self.client.commitment()),
+            max_supported_transaction_version: None,
         };
         
         match self.client.get_transaction_with_config(signature, config) {
             Ok(tx_response) => {
                 if let Some(decoded) = tx_response.transaction.transaction.decode() {
-                    if let Some(legacy_tx) = decoded.into_legacy_transaction() {
-                        Ok(Some(legacy_tx))
-                    } else {
-                        let error = ClientError::new_with_request(
-                            ClientErrorKind::Custom("Transaction is not a legacy transaction".to_string()),
-                            RpcRequest::GetTransaction
-                        );
-                        Err(SolanaAdapterError::RpcClient(error))
-                    }
+                    Ok(Some(decoded))
                 } else {
                     let error = ClientError::new_with_request(
                         ClientErrorKind::Custom("Failed to decode transaction".to_string()),
@@ -158,7 +148,7 @@ impl SolanaRpcClient {
         
         let config = RpcSendTransactionConfig {
             skip_preflight: false,
-            preflight_commitment: Some(self.config.commitment),
+            preflight_commitment: Some(self.client.commitment()),
             encoding: Some(UiTransactionEncoding::Base64),
             max_retries: Some(self.config.max_retries as usize),
             min_context_slot: None,

@@ -6,19 +6,28 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 
-pub mod adapter_registry;
-pub mod chainadapter;
-pub mod error;
+pub mod adapters;
+pub mod registry;
+pub mod traits;
 pub mod types;
 
-pub mod evm;
-pub mod solana;
-pub mod substrate;
-pub mod sui;
-
-pub use adapter_registry::AdapterRegistry;
-pub use chainadapter::{ChainAdapter, AdapterError};
-pub use error::IcapError;
-pub use types::{ChainConfig, *};
+pub use adapters::{
+    EvmAdapter, EvmConfig, EvmContracts,
+    SolanaAdapter, SolanaConfig,
+    SubstrateAdapter, SubstrateConfig,
+    SuiAdapter, SuiConfig,
+};
+pub use registry::{AdapterRegistry, RegistryConfig};
+pub use traits::{
+    ChainAdapter, FinalityProvider, MessageProver,
+    MessageSubmitter, EventListener, CapabilityProvider,
+    EventSubscription,
+};
+pub use types::{
+    AdapterError, ChainCapabilities, ConnectionStatus,
+    FinalizedBlock, HealthMetrics, SubmissionOptions,
+    TransactionDetails, TransactionStatus, FinalityType,
+    ParsedTransaction,
+};
 
 pub type Result<T> = std::result::Result<T, IcapError>; 

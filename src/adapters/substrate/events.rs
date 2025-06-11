@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use futures::StreamExt;
 use parity_scale_codec::Decode;
 use std::convert::TryFrom;
-use frostgate_circuits::sp1::{Sp1Plug, Sp1PlugConfig, types::Sp1ProofType};
+use frostgate_circuits::sp1::{Sp1Backend, Sp1Config};
 use frostgate_circuits::types::ProgramInfo;
 use blake2::Digest;
 
@@ -56,16 +56,16 @@ pub struct EventHandler {
     /// Cache for verification keys
     verifier_cache: Arc<RwLock<HashMap<H256, VerifierCacheEntry>>>,
 
-    /// SP1 plug instance for verification
-    sp1_plug: Arc<Sp1Plug>,
+    /// SP1 backend instance for verification
+    sp1_backend: Arc<Sp1Backend>,
 }
 
 impl EventHandler {
     /// Creates a new event handler
     pub fn new(client: Arc<OnlineClient<SubxtPolkadotConfig>>, pallet_name: String) -> Self {
-        // Initialize SP1 plug with default config
-        let config = Sp1PlugConfig::default();
-        let sp1_plug = Arc::new(Sp1Plug::new(config));
+        // Initialize SP1 backend with default config
+        let config = Sp1Config::default();
+        let sp1_backend = Arc::new(Sp1Backend::with_config(config));
 
         Self {
             client,
@@ -73,7 +73,7 @@ impl EventHandler {
             last_block: Arc::new(RwLock::new(None)),
             event_cache: Arc::new(RwLock::new(HashMap::new())),
             verifier_cache: Arc::new(RwLock::new(HashMap::new())),
-            sp1_plug,
+            sp1_backend,
         }
     }
 
@@ -121,9 +121,9 @@ impl EventHandler {
         let program_bytes = include_bytes!("../../../frostgate-circuits/programs/message_verifier.sp1");
         
         // Setup the program in SP1
-        let mut programs = self.sp1_plug.programs.write().await;
+        let mut programs = self.sp1_backend.programs.write().await;
         let program_hash = frostgate_circuits::sp1::prover::setup_program(
-            &self.sp1_plug.backend,
+            &self.sp1_backend.backend,
             &mut programs,
             program_bytes,
         ).await.map_err(|e| AdapterError::Other(format!("Failed to setup verifier: {}", e)))?;
@@ -189,7 +189,7 @@ impl EventHandler {
 
         // Verify the proof using cached verifier
         let is_valid = frostgate_circuits::sp1::verifier::verify_proof(
-            &self.sp1_plug.backend,
+            &self.sp1_backend.backend,
             &sp1_proof,
             &program_info.verifying_key,
         ).await.map_err(|e| AdapterError::Other(format!("Proof verification failed: {}", e)))?;
@@ -277,7 +277,7 @@ impl EventHandler {
                                     block_number,
                                     message_event.message.id
                                 );
-                                events.push(message_event);
+                        events.push(message_event);
                             }
                             Err(e) => {
                                 warn!(
@@ -506,22 +506,22 @@ impl EventHandler {
                     to_chain: ChainId::try_from(event_data.to_chain as u64)
                         .map_err(|_| AdapterError::Other(format!("Invalid to_chain id: {}", event_data.to_chain)))?,
                     payload: event_data.payload,
-                    proof: None,
+            proof: None,
                     timestamp: event_data.timestamp,
-                    nonce: 0,
-                    signature: None,
+            nonce: 0,
+            signature: None,
                     fee: None,
                     metadata: Some(HashMap::from([
                         ("error".to_string(), event_data.error),
                         ("event_type".to_string(), "MessageFailed".to_string()),
                     ])),
-                };
+        };
 
-                Ok(MessageEvent {
+        Ok(MessageEvent {
                     message,
-                    block_number: Some(block_number as u64),
-                    tx_hash: None,
-                })
+            block_number: Some(block_number as u64),
+            tx_hash: None,
+        })
             },
 
             _ => Err(AdapterError::Other(format!("Unsupported event variant: {}", variant_name))),

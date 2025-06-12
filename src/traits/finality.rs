@@ -1,6 +1,8 @@
-use async_trait::async_trait;
-use crate::types::block::FinalizedBlockId;
-use crate::types::error::FinalityError;
+pub use frostgate_sdk::traits::FinalityProvider;
+
+// Re-export types used by implementations
+pub use crate::types::block::FinalizedBlockId;
+pub use crate::types::error::FinalityError;
 
 /// Provides finality-related functionality for a blockchain
 #[async_trait]

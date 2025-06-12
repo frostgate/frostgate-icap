@@ -16,6 +16,17 @@ use crate::types::{
 use frostgate_sdk::frostmessage::{FrostMessage, MessageEvent};
 use std::time::Duration;
 
+// Re-export SDK traits
+pub use frostgate_sdk::traits::{
+    FinalityProvider,
+    MessageProver,
+    MessageSubmitter,
+    EventListener,
+    CapabilityProvider,
+    EventSubscription,
+    ChainAdapter,
+};
+
 /// Provides finality-related functionality for a blockchain
 #[async_trait]
 pub trait FinalityProvider: Send + Sync {

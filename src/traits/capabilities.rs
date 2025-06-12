@@ -1,3 +1,5 @@
+pub use frostgate_sdk::traits::CapabilityProvider;
+
 /// Types of proof systems supported by a chain
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProofType {

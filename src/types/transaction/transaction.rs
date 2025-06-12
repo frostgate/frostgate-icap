@@ -1,3 +1,10 @@
+pub use frostgate_sdk::types::{
+    TransactionDetails,
+    ParsedTransaction,
+    TransactionStatus,
+    ProofData,
+};
+
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 

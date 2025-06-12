@@ -8,8 +8,6 @@
 
 pub mod adapters;
 pub mod registry;
-pub mod traits;
-pub mod types;
 
 pub use adapters::{
     EvmAdapter, EvmConfig, EvmContracts,
@@ -18,16 +16,15 @@ pub use adapters::{
     SuiAdapter, SuiConfig,
 };
 pub use registry::{AdapterRegistry, RegistryConfig};
-pub use traits::{
+
+// Re-export SDK types for convenience
+pub use frostgate_sdk::{
     ChainAdapter, FinalityProvider, MessageProver,
     MessageSubmitter, EventListener, CapabilityProvider,
-    EventSubscription,
-};
-pub use types::{
-    AdapterError, ChainCapabilities, ConnectionStatus,
-    FinalizedBlock, HealthMetrics, SubmissionOptions,
-    TransactionDetails, TransactionStatus, FinalityType,
-    ParsedTransaction,
+    EventSubscription, AdapterError, ChainCapabilities,
+    ConnectionStatus, FinalizedBlock, HealthMetrics,
+    SubmissionOptions, TransactionDetails, TransactionStatus,
+    FinalityType, ParsedTransaction,
 };
 
 pub type Result<T> = std::result::Result<T, IcapError>; 

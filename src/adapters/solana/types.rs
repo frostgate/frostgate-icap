@@ -5,7 +5,7 @@ use solana_sdk::{
 use std::time::{SystemTime, Duration};
 use uuid::Uuid;
 use thiserror::Error;
-use frostgate_sdk::frostmessage::MessageStatus;
+use frostgate_sdk::message::MessageStatus;
 
 /// Configuration parameters for the Solana adapter
 #[derive(Debug, Clone)]

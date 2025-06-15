@@ -6,7 +6,7 @@
 
 use ethers::prelude::*;
 use ethers::types::{Filter, Log};
-use frostgate_sdk::frostmessage::{MessageEvent, FrostMessage, ChainId};
+use frostgate_sdk::message::{MessageEvent, FrostMessage, ChainId};
 use crate::chainadapter::AdapterError;
 use tracing::{debug, info, warn};
 use std::sync::Arc;

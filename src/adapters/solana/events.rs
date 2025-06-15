@@ -5,7 +5,7 @@
 #![allow(dead_code)]
 
 
-use frostgate_sdk::frostmessage::MessageEvent;
+use frostgate_sdk::message::MessageEvent;
 use crate::chainadapter::AdapterError;
 use crate::solana::types::SolanaAdapterError;
 use crate::solana::clients::SolanaRpcClient;

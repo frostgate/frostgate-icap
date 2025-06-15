@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 
 use crate::traits::ChainAdapter;
 use crate::types::{AdapterError, HealthMetrics, ConnectionStatus};
-use frostgate_sdk::frostmessage::ChainId;
+use frostgate_sdk::message::ChainId;
 
 /// Registry entry for a chain adapter
 #[derive(Debug)]
@@ -265,7 +265,7 @@ impl Default for AdapterRegistry {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use frostgate_sdk::frostmessage::{FrostMessage, MessageEvent};
+    use frostgate_sdk::message::{FrostMessage, MessageEvent};
 
     // Mock adapter for testing
     struct MockAdapter {

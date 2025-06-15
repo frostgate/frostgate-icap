@@ -6,5 +6,3 @@ pub use frostgate_sdk::types::{
     FeeEstimationError,
     EventError,
 };
-
-// Add any ICAP-specific error types here if needed 

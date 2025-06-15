@@ -13,7 +13,7 @@ use crate::types::{
     AdapterError, ChainCapabilities, ConnectionStatus, FinalizedBlock,
     HealthMetrics, SubmissionOptions, TransactionDetails,
 };
-use frostgate_sdk::frostmessage::{FrostMessage, MessageEvent};
+use frostgate_sdk::messages::{FrostMessage, MessageEvent};
 use std::time::Duration;
 
 // Re-export SDK traits

@@ -5,8 +5,6 @@ pub use frostgate_sdk::types::{
     ProofData,
 };
 
-// Re-export any ICAP-specific transaction types here if needed
-
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 

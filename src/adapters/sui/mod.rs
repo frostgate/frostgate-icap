@@ -29,7 +29,7 @@ use crate::types::{
     HealthMetrics, SubmissionOptions, TransactionDetails, TransactionStatus,
     FinalityType,
 };
-use frostgate_sdk::frostmessage::{ChainId, FrostMessage, MessageEvent};
+use frostgate_sdk::message::{ChainId, FrostMessage, MessageEvent};
 
 /// Sui chain adapter configuration
 #[derive(Debug, Clone)]
